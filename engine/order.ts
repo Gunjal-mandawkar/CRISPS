@@ -8,8 +8,9 @@
 //      Phase 4 learns per-source offsets (R9).
 //   3. sort by adjusted time (ties by id, so the order is deterministic)
 //   4. mark each event `chained` if its causal predecessor (config/likelihoods.ts
-//      `upstream`) was seen EARLIER in the window, and `fresh` if it has not
-//      been scored by the filter yet. Readings flagged as a lying gateway
+//      `upstream`) was seen EARLIER in the window (for hospitals since Phase 4: 2+
+//      calls from one zone, not scattered calls), and `fresh` if it has not been
+//      scored by the filter yet. Readings flagged as a lying gateway
 //      (engine/grouping.ts) never count as a predecessor.
 // Heartbeats and retractions are bookkeeping, not evidence, so they are left out.
 
@@ -44,13 +45,15 @@ export function buildCleanedWindow(
   for (const e of cleaned) {
     const up = LIKELIHOODS[e.kind]?.upstream;
     if (!up) continue;
-    let n = 0;
+    const perZone = new Map<string, number>(); // predecessors counted per zone
     for (const u of cleaned) {
       if (u.adjusted_occurred_at >= e.adjusted_occurred_at) break; // sorted: nothing earlier after this
       if (!up.kinds.includes(u.kind) || !isStrong(u) || notContext.has(u.id)) continue;
       if (up.scope === "zone" && u.zone_id !== e.zone_id) continue;
-      n++;
+      perZone.set(u.zone_id, (perZone.get(u.zone_id) ?? 0) + 1);
     }
+    const counts = [...perZone.values()];
+    const n = up.scope === "one_zone" ? Math.max(0, ...counts) : counts.reduce((a, b) => a + b, 0);
     e.chained = n >= up.min;
   }
   return cleaned;

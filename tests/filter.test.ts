@@ -53,8 +53,10 @@ describe("forward filter", () => {
     expect(dark.coverage).toBeCloseTo(0.5, 9);
     // posterior = 0.5 * raw + 0.5 * prior
     expect(dark.posterior.NOISE).toBeCloseTo(0.5 * dark.raw.NOISE + 0.5 * PRIOR.NOISE, 9);
-    expect(dark.degraded).toBe(true);
+    // DEGRADED fires BELOW 0.5 (Phase 4): exactly half live is not degraded yet, 2 of 6 live is
+    expect(dark.degraded).toBe(false);
     expect(live.degraded).toBe(false);
+    expect(forwardFilter(PRIOR, units(evidence), { ...half, disp0: "dark" }).degraded).toBe(true);
   });
 
   it("only fresh events are scored, and a withdrawn (retracted) unit is subtracted back out", () => {

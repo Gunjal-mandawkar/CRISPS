@@ -28,7 +28,7 @@
 
 import { CAUSAL_EDGES, CAUSAL_ORDER } from "../config/causal-graph";
 import { FORECAST_KNOBS } from "../config/knobs";
-import { LIKELIHOODS, type LLRow } from "../config/likelihoods";
+import { type LikelihoodTables, type LLRow, TUNED_TABLES } from "../config/likelihoods";
 import { normalizeLog, zeroRow } from "./filter";
 import { type EventKind, type EvidenceUnit, type ForecastItem, HYPOTHESES, type ProbabilityVector, type Seconds } from "./types";
 
@@ -190,10 +190,19 @@ function tilt(p: ProbabilityVector, row: LLRow): ProbabilityVector {
 // Point estimate (no Monte Carlo): the first pending stage whose window is open or
 // about to close. "Arrives" = one chained event of that kind + the confirmation bonus.
 // "Not" = nothing changes, or the miss penalty if its window closes next tick.
-export function lookahead(lines: ForecastLine[], state: ForecastState, posterior: ProbabilityVector, now: Seconds, coverage: number, step = 60, k = FORECAST_KNOBS): Lookahead | undefined {
+export function lookahead(
+  lines: ForecastLine[],
+  state: ForecastState,
+  posterior: ProbabilityVector,
+  now: Seconds,
+  coverage: number,
+  step = 60,
+  k = FORECAST_KNOBS,
+  tables: LikelihoodTables = TUNED_TABLES,
+): Lookahead | undefined {
   const line = lines.find((l) => !state.resolved[l.kind] && l.window_p10 <= now + step && now <= l.window_p90 + k.detection_slack_s);
   if (!line) return undefined;
-  const table = LIKELIHOODS[line.kind];
+  const table = tables.kinds[line.kind];
   const arriveRow = zeroRow();
   if (table) for (const h of HYPOTHESES) arriveRow[h] = (table.chained ?? table.alone)[h];
   arriveRow.CASCADING_CRISIS += confirmBonus(line.kind, k);

@@ -5,12 +5,13 @@
 //                                                                        + forecast and explanation at those minutes
 //   npx tsx eval/trace.ts --split test --twin test-twin-5200             both twins side by side, prefix check
 //   npx tsx eval/trace.ts --split test --group cutout --policy engine    one line per episode in the group(s)
+// Single-episode traces use engine-frozen by default (no learning history; pass --policy to change).
 // --group matches the start of the group name ("cutout" = cutout:cameras + cutout:gateway).
 
 import { BASE_RATES } from "../config/transitions";
 import { ACTIONS, type TickRecord } from "../engine/types";
 import { groupOf, loadSplit, type Split } from "../sim/dataset";
-import { POLICIES } from "./baselines";
+import { makePolicy } from "./baselines";
 import { runEpisode } from "./run";
 
 function arg(name: string): string | undefined {
@@ -19,7 +20,7 @@ function arg(name: string): string | undefined {
 }
 
 const split = (arg("split") ?? "test") as Split;
-const policy = POLICIES[arg("policy") ?? "engine"];
+const policy = makePolicy(arg("policy") ?? "engine-frozen");
 const eps = loadSplit(split);
 const p = (x: number) => x.toFixed(3);
 const lvl = (r: TickRecord) => ACTIONS.indexOf(r.action);

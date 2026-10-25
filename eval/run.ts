@@ -3,8 +3,10 @@
 // At tick t the policy sees ONLY events with arrived_at <= t (R8).
 
 import { BASE_RATES } from "../config/transitions";
-import { ACTIONS, type Event, HYPOTHESES, type TickRecord } from "../engine/types";
-import { groupOf } from "../sim/dataset";
+import { ACTIONS, HYPOTHESES, type ProbabilityVector, type TickRecord } from "../engine/types";
+import { groupOf, type Split } from "../sim/dataset";
+import { rngFor } from "../sim/rng";
+import { SEEDS } from "../sim/params";
 import type { Episode } from "../sim/truth";
 import type { Policy, PolicyOutput } from "./baselines";
 import { brierScore, flipFlops, level, logLoss, mean, sqDistance, tickCost } from "./metrics";
@@ -25,6 +27,8 @@ export interface EpisodeResult {
   lead_min?: number; // critical_time - first ALERT tick, minutes (cascades only)
   flips: number;
   fallback_ticks: number;
+  degraded_ticks: number;
+  prior: ProbabilityVector; // the base rates this episode started from (learned since Phase 4)
   twin_role?: string;
   pre_split_overconf?: number; // mean squared distance from the base rates before the split
   commit_min?: number | null; // minutes after the split until committed to the truth (null = never)
@@ -113,6 +117,8 @@ export function runEpisode(policy: Policy, ep: Episode): { records: TickRecord[]
     any_alert: firstAlert !== undefined,
     flips: flipFlops(records.map((r) => r.action)),
     fallback_ticks: records.filter((r) => r.fallback).length,
+    degraded_ticks: records.filter((r) => r.degraded).length,
+    prior: policy.basePrior?.() ?? { ...BASE_RATES },
     forecast_items: 0,
     forecast_hits: 0,
     forecast_start_hits: 0,
@@ -129,7 +135,8 @@ export function runEpisode(policy: Policy, ep: Episode): { records: TickRecord[]
   if (truth.split_time !== undefined) {
     const split = truth.split_time;
     result.twin_role = truth.twin_role;
-    result.pre_split_overconf = mean(records.filter((r) => r.tick_time <= split).map((r) => sqDistance(r.probabilities, BASE_RATES)));
+    // before the split the ideal belief is the base-rate mixture: the prior THIS episode started from
+    result.pre_split_overconf = mean(records.filter((r) => r.tick_time <= split).map((r) => sqDistance(r.probabilities, result.prior)));
     const committed = records.find((r) => {
       if (r.tick_time <= split) return false;
       const top = HYPOTHESES.reduce((a, b) => (r.probabilities[b] > r.probabilities[a] ? b : a));
@@ -138,4 +145,32 @@ export function runEpisode(policy: Policy, ep: Episode): { records: TickRecord[]
     result.commit_min = committed ? (committed.tick_time - split) / 60 : null;
   }
   return { records, result };
+}
+
+// The order episodes are played in. The prior-shift sequence must stay in its
+// order (the regime change happens at episode 51). Dev and test files are sorted
+// by type, which would hand a learning policy 40 cascades in a row, so they are
+// played in one fixed shuffled order (seeded: every run sees the same order).
+export function evalOrder<T extends { episode_id: string }>(split: Split, episodes: T[]): T[] {
+  const sorted = episodes.slice().sort((a, b) => (a.episode_id < b.episode_id ? -1 : 1));
+  if (split === "prior-shift") return sorted;
+  return rngFor(split === "dev" ? SEEDS.dev : SEEDS.test, "eval-order").shuffle(sorted);
+}
+
+// Revealed after the episode: was each event REAL (part of something that truly
+// happened), or a false alarm (background blip), a lie (lying gateway) or a rumor?
+export function eventLabels(ep: Episode): (id: string) => boolean | undefined {
+  return (id) => {
+    const t = ep.truth.event_truths[id];
+    return t ? !t.is_background && !t.is_lie && !t.is_mimic : undefined;
+  };
+}
+
+// Play a whole sequence. After each episode a learning policy is told the truth.
+export function runSequence(policy: Policy, episodes: Episode[]): EpisodeResult[] {
+  return episodes.map((ep) => {
+    const { result } = runEpisode(policy, ep);
+    policy.afterEpisode?.(ep.truth.hypothesis, eventLabels(ep));
+    return result;
+  });
 }

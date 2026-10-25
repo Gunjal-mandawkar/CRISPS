@@ -76,16 +76,17 @@ export const FORECAST_KNOBS = {
 // Forward filter (engine/filter.ts) and tick runner (engine/tick.ts).
 export const FILTER_KNOBS = {
   window_s: 15 * 60, // the cleaned window: events that arrived in the last 15 minutes
-  // Trust tempering: each event's log-likelihood is multiplied by its source's trust.
-  // Flat for now; per-source Beta trust replaces this in Phase 4.
-  trust: { citizen_report: 0.7, default: 1.0 } as Record<string, number>,
+  // Trust tempering: each unit's log-likelihood is multiplied by the trust of its
+  // sources (per-source Beta trust since Phase 4: engine/trust.ts, config/trust-priors.ts).
   // Silence: each tick, every dark source adds this much log-likelihood to
   // SENSOR_FAILURE (stale sources half of it). Capped per tick so a big outage
   // does not shout louder than the "gateway lost" event itself.
   silence_dark_ll: 0.02,
   silence_stale_ll: 0.01,
   silence_cap_ll: 0.3,
-  degraded_below_coverage: 0.7, // DEGRADED flag when live coverage drops below this
+  // DEGRADED flag when TRUST-WEIGHTED live coverage drops below this (Phase 4: was 0.7
+  // on a plain head count, and never fired; see engine/source-status.ts weightedCoverage).
+  degraded_below_coverage: 0.5,
 };
 
 // Naive count-threshold baseline (engine/baseline.ts), also the future FALLBACK (R11).

@@ -188,6 +188,7 @@ export interface Explanation {
 // Per-source learned trust, Beta(alpha, beta) (R4).
 export interface TrustSnapshot {
   source_id: string;
+  source_type: SourceType;
   alpha: number;
   beta: number;
   mean: number; // alpha / (alpha + beta)

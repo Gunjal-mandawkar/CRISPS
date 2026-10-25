@@ -18,24 +18,31 @@
 //      then exponentiate and normalize so the 4 numbers sum to 1.
 //   3. WIDEN for lost coverage (R5): with only `coverage` of the sources live,
 //        posterior = coverage * raw + (1 - coverage) * base rates
-//      Fewer eyes => belief pulled back toward "we don't know". DEGRADED if coverage < 0.7.
+//      Fewer eyes => belief pulled back toward "we don't know". Since Phase 4 coverage
+//      is TRUST-WEIGHTED (losing 5 hospitals hurts more than losing 20 citizen
+//      channels) and DEGRADED fires below 0.5.
+//   Trust (engine/trust.ts) and the base rates (engine/priors.ts) are learned between
+//   episodes and handed in through FilterConfig; the likelihood tables too, so the
+//   eval can compare dev-tuned and hand-set tables.
 //
 // Pure function: same inputs => same output. No clock, no state, no ground truth.
 
 import { FILTER_KNOBS } from "../config/knobs";
-import { GATEWAY_CORRELATED, LIKELIHOODS, type LLRow, LOW_SEVERITY, RUMOR_CAPPED } from "../config/likelihoods";
+import { type LikelihoodTables, type LLRow, TUNED_TABLES } from "../config/likelihoods";
 import { PRIOR } from "../config/priors";
 import { TRANSITIONS } from "../config/transitions";
-import { summarize } from "./source-status";
+import { summarize, weightedCoverage } from "./source-status";
 import { type EvidenceUnit, HYPOTHESES, type Hypothesis, type ProbabilityVector, type SourceStatus } from "./types";
 
 export interface FilterConfig {
   basePrior: ProbabilityVector;
   transitions: Record<Hypothesis, Record<Hypothesis, number>>;
   knobs: typeof FILTER_KNOBS;
+  tables: LikelihoodTables;
+  coverageWeights?: Record<string, number>; // source id -> weight (its type's mean trust); missing = 1
 }
 
-export const DEFAULT_FILTER_CONFIG: FilterConfig = { basePrior: PRIOR, transitions: TRANSITIONS, knobs: FILTER_KNOBS };
+export const DEFAULT_FILTER_CONFIG: FilterConfig = { basePrior: PRIOR, transitions: TRANSITIONS, knobs: FILTER_KNOBS, tables: TUNED_TABLES };
 
 export interface FilterResult {
   posterior: ProbabilityVector; // after widening: report and decide on this one
@@ -53,22 +60,27 @@ export interface UnitUpdate {
 
 export const zeroRow = (): LLRow => ({ NOISE: 0, SENSOR_FAILURE: 0, ISOLATED_INCIDENT: 0, CASCADING_CRISIS: 0 });
 
+// Which table row scores this unit, and how much it is scaled by:
+//   key    names the row ("drainage_anomaly.chained", "low", "gateway", "rumor"); engine/tune.ts uses it
+//   scale  weight x trust (a lying gateway is judged as a unit: its fake sensors' trust does not apply)
+// undefined = the unit carries no evidence (every member retracted, heartbeats, retractions).
+export function unitRow(u: EvidenceUnit, tables: LikelihoodTables = TUNED_TABLES): { key: string; row: LLRow; scale: number } | undefined {
+  if (u.n === 0 || u.weight === 0) return undefined;
+  if (u.unit_type === "gateway_correlated") return { key: "gateway", row: tables.gateway, scale: u.weight };
+  const scale = u.weight * u.trust;
+  if (!u.strong) return { key: "low", row: tables.low, scale };
+  if (u.unit_type === "narrative" && !u.corroborated) return { key: "rumor", row: tables.rumor, scale };
+  const table = tables.kinds[u.kind];
+  if (!table) return undefined;
+  return u.chained && table.chained ? { key: `${u.kind}.chained`, row: table.chained, scale } : { key: `${u.kind}.alone`, row: table.alone, scale };
+}
+
 // One unit's log-likelihood row, weight and trust applied.
-export function unitLogLikelihood(u: EvidenceUnit): LLRow {
+export function unitLogLikelihood(u: EvidenceUnit, tables: LikelihoodTables = TUNED_TABLES): LLRow {
   const out = zeroRow();
-  if (u.n === 0 || u.weight === 0) return out; // every member retracted: contributes nothing
-  let base: LLRow;
-  if (u.unit_type === "gateway_correlated") base = GATEWAY_CORRELATED;
-  else if (!u.strong) base = LOW_SEVERITY;
-  else if (u.unit_type === "narrative" && !u.corroborated) base = RUMOR_CAPPED;
-  else {
-    const table = LIKELIHOODS[u.kind];
-    if (!table) return out; // heartbeats, retractions: no evidence
-    base = u.chained && table.chained ? table.chained : table.alone;
-  }
-  // a lying gateway is judged as a unit: the (fake) sensors' trust does not apply
-  const scale = u.unit_type === "gateway_correlated" ? u.weight : u.weight * u.trust;
-  for (const h of HYPOTHESES) out[h] = scale * base[h];
+  const r = unitRow(u, tables);
+  if (!r) return out;
+  for (const h of HYPOTHESES) out[h] = r.scale * r.row[h];
   return out;
 }
 
@@ -88,6 +100,12 @@ export function normalizeLog(logp: LLRow): ProbabilityVector {
   return out;
 }
 
+// Silence: dark sources add a little to SENSOR_FAILURE (stale ones half), capped per tick.
+export function silenceLL(sourceStatuses: Record<string, SourceStatus>, k: FilterConfig["knobs"] = FILTER_KNOBS): number {
+  const st = summarize(sourceStatuses);
+  return Math.min(k.silence_cap_ll, st.dark * k.silence_dark_ll + st.stale * k.silence_stale_ll);
+}
+
 export function forwardFilter(
   prior: ProbabilityVector,
   updates: UnitUpdate[],
@@ -102,7 +120,7 @@ export function forwardFilter(
 
   const contributions = new Map<string, LLRow>();
   for (const { unit, previous } of updates) {
-    const ll = unitLogLikelihood(unit);
+    const ll = unitLogLikelihood(unit, config.tables);
     unit.hypothesis_contributions = ll;
     contributions.set(unit.unit_id, ll);
     for (const h of HYPOTHESES) logp[h] += ll[h] - previous[h]; // only what changed since last time
@@ -111,11 +129,10 @@ export function forwardFilter(
 
   // Silence is weak evidence of a broken sensor, not of calm and not of crisis.
   const st = summarize(sourceStatuses);
-  const silence = Math.min(k.silence_cap_ll, st.dark * k.silence_dark_ll + st.stale * k.silence_stale_ll);
-  logp.SENSOR_FAILURE += silence;
+  logp.SENSOR_FAILURE += silenceLL(sourceStatuses, k);
 
   const raw = normalizeLog(logp);
-  const c = st.coverage;
+  const c = config.coverageWeights ? weightedCoverage(sourceStatuses, config.coverageWeights) : st.coverage;
   const posterior = zeroRow();
   for (const h of HYPOTHESES) posterior[h] = c * raw[h] + (1 - c) * config.basePrior[h];
   for (const h of HYPOTHESES) if (!Number.isFinite(posterior[h])) throw new Error(`filter produced a non-finite probability for ${h}`);

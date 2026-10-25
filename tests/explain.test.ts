@@ -4,6 +4,7 @@
 import { describe, expect, it } from "vitest";
 import { cascadeLLR } from "../engine/explain";
 import { Engine } from "../engine/tick";
+import { snapshot } from "../engine/trust";
 import type { Event, TickRecord } from "../engine/types";
 import { generateEpisode, generateTwinPair } from "../sim/episode";
 import type { Episode } from "../sim/truth";
@@ -36,7 +37,8 @@ describe("explanations", () => {
   });
 
   it("handles a retraction inside a cluster: 'Revised: event X was retracted ...'", () => {
-    const engine = new Engine(REGISTRY);
+    // a fully trusted traffic sensor, so one retraction visibly moves the belief
+    const engine = new Engine(REGISTRY, { trust: { traf0: snapshot("traf0", "traffic_sensor", { alpha: 20, beta: 0 }) } });
     const five = [10, 20, 30, 40, 50].map((dt, i) => ev({ id: `c${i}`, arrived_at: 60 + dt, value: 50 + i }));
     const first = engine.tick(five, 120);
     expect(first.clusters).toBe(1);

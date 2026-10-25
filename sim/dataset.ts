@@ -46,30 +46,35 @@ export function buildSplit(split: "dev" | "test"): Episode[] {
   return out;
 }
 
-// 100 episodes in order. From episode 50 on, the base-rate mix silently shifts
+// 100 episodes in order. From episode 51 on, the base-rate mix silently shifts
 // to a monsoon regime: more rain-only days and more cascades.
+// Phase 4: each half holds EXACTLY its regime's mix (counts = share x 50, rounded by
+// largest remainder), in a seeded shuffled order. Phase 1 drew every episode
+// independently, and that draw gave 9 cascades in the "normal" half (18%, nominal 8%)
+// and 11 in the monsoon half (22%, nominal 25%): the sequence barely shifted at all.
+export function regimeCounts(mix: Record<string, number>, n: number): [string, number][] {
+  const raw = Object.entries(mix).map(([k, p]) => ({ k, x: p * n }));
+  const out = raw.map(({ k, x }) => ({ k, c: Math.floor(x), r: x - Math.floor(x) }));
+  let left = n - out.reduce((s, o) => s + o.c, 0);
+  for (const o of out.slice().sort((a, b) => b.r - a.r)) {
+    if (left <= 0) break;
+    o.c++;
+    left--;
+  }
+  return out.map((o) => [o.k, o.c]);
+}
+
 export function buildPriorShift(): Episode[] {
   const rng = rngFor(SEEDS.prior_shift, "mix");
-  const out: Episode[] = [];
-  for (let i = 0; i < PRIOR_SHIFT.length; i++) {
-    const monsoon = i >= PRIOR_SHIFT.shift_at;
-    const mix = monsoon ? PRIOR_SHIFT.monsoon : PRIOR_SHIFT.normal;
-    let u = rng.float();
-    let name = "noise";
-    for (const [k, p] of Object.entries(mix)) {
-      name = k;
-      u -= p;
-      if (u < 0) break;
-    }
+  const half = (mix: Record<string, number>, n: number) => rng.shuffle(regimeCounts(mix, n).flatMap(([k, c]) => Array<string>(c).fill(k)));
+  const names = [...half(PRIOR_SHIFT.normal, PRIOR_SHIFT.shift_at), ...half(PRIOR_SHIFT.monsoon, PRIOR_SHIFT.length - PRIOR_SHIFT.shift_at)];
+  return names.map((name, i) => {
     const seed = SEEDS.prior_shift + i;
-    out.push(
-      generateEpisode(name as ScenarioName, seed, {
-        weather: monsoon ? "monsoon" : "normal",
-        episode_id: `shift-${String(i).padStart(3, "0")}-${name}`,
-      }),
-    );
-  }
-  return out;
+    return generateEpisode(name as ScenarioName, seed, {
+      weather: i >= PRIOR_SHIFT.shift_at ? "monsoon" : "normal",
+      episode_id: `shift-${String(i).padStart(3, "0")}-${name}`,
+    });
+  });
 }
 
 export function writeSplit(split: Split, eps: Episode[]): string {

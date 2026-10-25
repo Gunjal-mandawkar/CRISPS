@@ -2,7 +2,7 @@
 // The causal-chain forecast: causal order, time windows, confirmation bonus, lookahead.
 
 import { describe, expect, it } from "vitest";
-import { CAUSAL_ORDER } from "../config/causal-graph";
+import { CAUSAL_EDGES, CAUSAL_ORDER } from "../config/causal-graph";
 import { FORECAST_KNOBS } from "../config/knobs";
 import { PRIOR } from "../config/priors";
 import { decide, initialDecisionState } from "../engine/decide";
@@ -26,11 +26,13 @@ describe("causal-chain forecast", () => {
     const lines = forecastLines(st, posterior);
     expect(lines.map((l) => l.kind)).toEqual(CAUSAL_ORDER.slice(2)); // traffic, calls, hospital, power
     const traffic = lines[0];
-    // expected = drainage seen (280) + lag mean 120; sd = sqrt(45^2 + 2 * 90^2) = 135
-    expect(traffic.expected_at).toBe(400);
-    const sd = Math.sqrt(45 ** 2 + 2 * FORECAST_KNOBS.detection_sd_s ** 2);
-    expect(traffic.window_p10).toBe(Math.round(400 - FORECAST_KNOBS.window_z * sd));
-    expect(traffic.window_p90).toBe(Math.round(400 + FORECAST_KNOBS.window_z * sd));
+    // expected = drainage seen (280) + the drainage -> traffic lag mean; sd = sqrt(lag sd^2 + 2 * 90^2)
+    // (the lag was measured on dev by `npm run tune`, config/lags.ts; hand-set it was 120 +/- 45)
+    const lag = CAUSAL_EDGES.find((e) => e.to === "traffic_slowdown")!.lag;
+    expect(traffic.expected_at).toBe(Math.round(280 + lag.mean));
+    const sd = Math.sqrt(lag.sd ** 2 + 2 * FORECAST_KNOBS.detection_sd_s ** 2);
+    expect(traffic.window_p10).toBe(Math.round(280 + lag.mean - FORECAST_KNOBS.window_z * sd));
+    expect(traffic.window_p90).toBe(Math.round(280 + lag.mean + FORECAST_KNOBS.window_z * sd));
     expect(traffic.probability).toBeCloseTo(0.3 * 0.9, 9); // P(cascade) x pass-through
     // later stages: later and wider windows, lower probability
     for (let i = 1; i < lines.length; i++) {
