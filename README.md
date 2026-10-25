@@ -8,7 +8,7 @@ Every simulated minute it reads a messy multi-source event stream and outputs:
 3. a forecast of the next 3 events with time windows
 4. a plain-language explanation of why the belief or action changed
 
-Full spec: [docs/SPEC.md](docs/SPEC.md). Status: **Phase 2 done**: engine core (adapter, validation/quarantine, event log with dedupe and retractions, ordering, source status, Bayesian forward filter, cost-based decision with hysteresis, tick runner with baseline fallback). On the test split it beats count-threshold on Brier (0.528 vs 0.724), false alarms (10.1% vs 34.8%) and cost (2.85 vs 7.73 per tick), but is later (lead -6.7 vs -3.9 min). No clustering, gateway grouping, forecast, learning or explanations yet. Phase reports: [docs/phase-reports/](docs/phase-reports/).
+Full spec: [docs/SPEC.md](docs/SPEC.md). Status: **Phase 3 done**: engine core plus near-duplicate clustering (weight 1 + ln n, surge protection), common-cause grouping (lying-gateway detector, rumor cap, one weather event per zone), causal-chain forecast with time windows, one-step lookahead and template explanations. On the test split it beats count-threshold on Brier (0.431 vs 0.724), false alarms (3.8% vs 34.8%) and cost (2.63 vs 7.73 per tick); forecast accuracy 82%. It is still later than count-threshold (lead -6.2 vs -3.9 min). No learning yet (Phase 4). Phase reports: [docs/phase-reports/](docs/phase-reports/).
 
 ## Architecture
 
@@ -18,9 +18,9 @@ sim/ (seeded episodes + hidden GroundTruth)
   ▼
 engine/adapter → validate (quarantine) → log (arrived_at <= now, dedupe, retractions)
   → order (cleaned 15-min window) + source-status (live/stale/dark)
-  → [Phase 3: cluster (gateway / rumor / near-dup)]
-  → filter (Bayesian, log-space) → decide (cost + hysteresis)      engine/tick.ts runs it all
-  → forecast (causal graph) → explain (templates)
+  → cluster (near-dup, narrative) + grouping (gateway lie, rumor cap, weather) → evidence units
+  → forecast check (causal graph) → filter (Bayesian, log-space, scores units)
+  → forecast + lookahead → decide (cost + hysteresis) → explain (templates)   engine/tick.ts runs it all
   │  TickRecord every minute (fallback.ts catches failures)
   ▼
 server/ (Express + SSE) → dashboard/ (vanilla HTML/JS)
@@ -62,6 +62,8 @@ npm run eval -- --split test --policy engine    # the Bayesian engine + 3-row co
 npm run eval -- --split dev --policy all
 npx tsx eval/trace.ts --split test --episode test-cascade-5120   # tick-by-tick belief of one episode
 npx tsx eval/trace.ts --split test --group cutout                # one line per episode of a group
+npx tsx eval/trace.ts --split test --episode test-cascade-5120 --detail 5,10,15   # + explanation text at those minutes
+npx tsx eval/trace.ts --split test --twin test-twin-5200         # twin pair side by side, identity check up to the split
 npx tsx eval/separability.ts --split dev        # how separable cascades vs lookalikes are, minute by minute
 
 npm run dev        # Phase 5
@@ -80,16 +82,16 @@ Requires Node 22.12+ (tested on Node 22.22).
 
 | Req | Description | Status |
 |---|---|---|
-| R1 | Honest probabilities + twin test | partial: Bayesian forward filter with base-rate prior; Brier 0.528 (test). Pre-split twin overconfidence 0.048, not yet calibrated (temperature in Phase 4) |
-| R2 | Optimal stopping + cost model | partial: expected-cost action choice from config/costs.ts; no one-step lookahead yet |
-| R3 | Foresight (causal forecast) | not started |
+| R1 | Honest probabilities + twin test | partial: Bayesian forward filter on de-duplicated evidence units; Brier 0.431 (test). Twins byte-identical up to the split (tested); pre-split overconfidence 0.035. No temperature calibration yet (Phase 4) |
+| R2 | Optimal stopping + cost model | done: expected-cost action choice from config/costs.ts plus one-step lookahead (defer / anticipate) in engine/decide.ts. Lookahead has no measurable effect on dev |
+| R3 | Foresight (causal forecast) | done: next 3 stages with p10-p90 windows and P(cascade) x pass-through; confirmed forecasts add to CASCADE, missed ones subtract; "no further escalation" when benign dominates. Forecast accuracy 82% (test). Lags are the simulator's own |
 | R4 | Learning + prior shifts | simulator only: 100-episode prior-shift sequence, drifting-reliability sources |
-| R5 | Adversity + cutouts | partial: validation + quarantine, live/stale/dark sources, silence nudge to SENSOR_FAILURE, coverage widening + DEGRADED flag, gateway_heartbeat_lost evidence. No gateway grouping / lie detector yet (Phase 3) |
+| R5 | Adversity + cutouts | done for Phase 3 scope: validation + quarantine, live/stale/dark, silence nudge, coverage widening + DEGRADED, gateway perfect-correlation detector (lie FA 0%, Brier 0.390), rumor cap |
 | R6 | Stability (hysteresis) | done: 2 up / 4 down + P(cascade) thresholds / dwell 3 / fast commit > 0.9 (engine/decide.ts) |
-| R7 | Explainability | not started |
+| R7 | Explainability | done: top 3 evidence units by LLR, what changed and why (incl. "Revised: ..." on retraction, gateway lost), forecast in words. Template sentences only |
 | R8 | Strict future-data isolation | done for the engine: log refuses arrived_at > now, future-injection test on the engine, engine/ never imports sim/ or eval/ (tested) |
 | R9 | Clock skew | simulator only: hidden per-source offsets (+/- 2 min) |
-| R10 | Near-duplicate clustering | simulator only: duplicate storms and genuine surges |
+| R10 | Near-duplicate clustering | done: same zone + kind within 3 min, weight 1 + ln(n), surge protection (n >= 30, value sd > 3), retraction at cluster level |
 | R11 | Safe fallback | done: try/catch around steps 5-8, count-threshold baseline, action capped at the previous one, FALLBACK flag, fallback ticks in eval |
 | R12 | Demo mode | seeded deterministic scenarios exist; demo scripts in Phase 6 |
 

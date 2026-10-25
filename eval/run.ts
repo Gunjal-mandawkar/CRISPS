@@ -28,6 +28,37 @@ export interface EpisodeResult {
   twin_role?: string;
   pre_split_overconf?: number; // mean squared distance from the base rates before the split
   commit_min?: number | null; // minutes after the split until committed to the truth (null = never)
+  forecast_items: number; // distinct forecast lines issued whose window closed before the episode ended
+  forecast_hits: number; // of those: a real event of that kind truly happened inside [p10, p90]
+  forecast_start_hits: number; // stricter: the true START of that stage (first zone) lies inside [p10, p90]
+}
+
+// Forecast accuracy (Phase 3). Every distinct (kind, p10, p90) the policy forecast
+// counts once. It is a hit if a REAL event of that kind (not background noise, not
+// a lie, not a rumor) truly occurred inside the window. Uses ground truth, so it
+// lives here in eval, never in the engine.
+// The stricter score asks whether the stage truly STARTED inside the window.
+export function forecastHits(records: TickRecord[], ep: Episode): { items: number; hits: number; startHits: number } {
+  const seen = new Set<string>();
+  let items = 0;
+  let hits = 0;
+  let startHits = 0;
+  for (const r of records) {
+    for (const f of r.forecast) {
+      const key = `${f.kind}|${f.window_p10}|${f.window_p90}`;
+      if (seen.has(key) || f.window_p90 > ep.duration) continue;
+      seen.add(key);
+      items++;
+      const hit = ep.events.some((e) => {
+        const t = ep.truth.event_truths[e.id];
+        return e.kind === f.kind && t && !t.is_background && !t.is_lie && !t.is_mimic && t.true_occurred_at >= f.window_p10 && t.true_occurred_at <= f.window_p90;
+      });
+      if (hit) hits++;
+      const start = ep.truth.stage_times[f.kind];
+      if (start !== undefined && start >= f.window_p10 && start <= f.window_p90) startHits++;
+    }
+  }
+  return { items, hits, startHits };
 }
 
 function makeRecord(t: number, out: PolicyOutput): TickRecord {
@@ -38,8 +69,9 @@ function makeRecord(t: number, out: PolicyOutput): TickRecord {
     expected_cost: NaN,
     expected_costs: { WATCH: NaN, PREPARE: NaN, ALERT: NaN, ESCALATE: NaN }, // baselines do not compute these
     forecast: [],
-    top_evidence: [],
-    changes: [],
+    explanation: { top_evidence: [], delta_summary: "", forecast_summary: "" },
+    evidence_units: 0,
+    clusters: 0,
     degraded: false,
     fallback: false,
     source_statuses: {},
@@ -81,7 +113,16 @@ export function runEpisode(policy: Policy, ep: Episode): { records: TickRecord[]
     any_alert: firstAlert !== undefined,
     flips: flipFlops(records.map((r) => r.action)),
     fallback_ticks: records.filter((r) => r.fallback).length,
+    forecast_items: 0,
+    forecast_hits: 0,
+    forecast_start_hits: 0,
   };
+  if (h === "CASCADING_CRISIS") {
+    const fh = forecastHits(records, ep);
+    result.forecast_items = fh.items;
+    result.forecast_hits = fh.hits;
+    result.forecast_start_hits = fh.startHits;
+  }
   if (h === "CASCADING_CRISIS" && truth.critical_time !== undefined && firstAlert) {
     result.lead_min = (truth.critical_time - firstAlert.tick_time) / 60;
   }

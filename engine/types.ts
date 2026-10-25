@@ -126,18 +126,63 @@ export interface CleanedEvent extends Event {
   fresh: boolean; // arrived since the last tick that ran the filter (scored this tick)
 }
 
-// One forecast line: "event X likely between p10 and p90 minutes from now".
+// One forecast line: "event X likely between p10 and p90" (R3).
+// Times are ABSOLUTE engine seconds (same clock as tick_time), not "minutes from now".
 export interface ForecastItem {
   kind: EventKind;
-  probability: number; // already weighted by P(cascade)
+  probability: number; // P(cascade) x pass-through along the causal chain
   window_p10: Seconds;
   window_p90: Seconds;
+  expected_at: Seconds; // the mean of the window
+  zones: string[]; // zones where the upstream stage was seen
+}
+
+// Evidence after clustering and grouping (Phase 3, engine/grouping.ts).
+// The filter scores UNITS, not raw events: 25 copies of one story = one unit.
+//   single             one event that matched nothing else
+//   near_duplicate     same zone + kind within 3 min, weight 1 + ln(n)
+//   gateway_correlated identical values from many sensors of one gateway (favors SENSOR_FAILURE)
+//   narrative          citizen reports sharing a narrative_id (capped unless corroborated)
+export type UnitType = "single" | "near_duplicate" | "gateway_correlated" | "narrative";
+
+export interface EvidenceUnit {
+  unit_id: string;
+  unit_type: UnitType;
+  kind: EventKind;
+  zone_id: string;
+  n: number; // member events (after retractions)
+  weight: number; // how many "independent events" this unit is worth
+  strong: boolean; // some member passed the severity gate
+  chained: boolean; // some member had its causal predecessor earlier (config/likelihoods.ts)
+  trust: number; // mean source trust of the members
+  value?: number; // representative value (median of members)
+  first_t: Seconds; // earliest skew-adjusted occurred_at of a member
+  last_t: Seconds;
+  last_arrived_at: Seconds;
+  gateway_id?: string;
+  narrative_id?: string;
+  corroborated?: boolean; // narrative only
+  surge?: boolean; // near_duplicate only: too varied to be one incident, not discounted
+  common_cause?: string; // set when the weight was discounted as part of one weather event (engine/grouping.ts)
+  hypothesis_contributions: Record<Hypothesis, number>; // log-likelihood row it adds (weight already applied)
+  source_unit_ids: string[]; // member event ids, for explanation tracing
+  sources: string[]; // distinct source ids of the members
 }
 
 // One evidence contribution, for explanations (R7).
 export interface EvidenceContribution {
-  description: string;
-  llr: number; // log-likelihood ratio, CASCADE vs the rest
+  unit_id: string;
+  description: string; // "3 drainage_anomaly reports in z03 (near-duplicate cluster)"
+  kind: EventKind | "forecast";
+  zone_id?: string;
+  llr: number; // log-likelihood ratio, CASCADE vs the rest (positive = toward cascade)
+  supports: Hypothesis; // the hypothesis this unit pushes up the most
+}
+
+export interface Explanation {
+  top_evidence: EvidenceContribution[]; // top 3 by |llr|
+  delta_summary: string; // what changed since the last tick, and why
+  forecast_summary: string;
 }
 
 // Per-source learned trust, Beta(alpha, beta) (R4).
@@ -156,8 +201,9 @@ export interface TickRecord {
   expected_cost: number; // expected cost of the recommended action
   expected_costs: Record<Action, number>;
   forecast: ForecastItem[]; // next 3 events
-  top_evidence: EvidenceContribution[]; // top 3 by |llr|
-  changes: string[]; // "why it changed" sentences
+  explanation: Explanation; // top 3 evidence, what changed, forecast in words (R7)
+  evidence_units: number; // units with evidence in the current window (debugging)
+  clusters: number; // of those, units holding 2+ events
   degraded: boolean; // R5: sources went dark, uncertainty widened
   fallback: boolean; // R11: main engine failed, baseline used
   source_statuses: Record<string, SourceStatus>;

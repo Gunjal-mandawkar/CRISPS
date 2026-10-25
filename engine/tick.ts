@@ -5,12 +5,18 @@
 //   3    validate (malformed -> quarantined, kept for the dashboard)
 //   4    append to the log (dedupe by id, retractions incl. orphans)
 //   ---- inside try/catch ----
-//   5    build the cleaned, ordered window
-//   6    update source statuses (live / stale / dark)
-//   7    forward filter: prior -> posterior
-//   8    decide: posterior + hysteresis state -> action + expected cost
+//   5    cleaned, ordered window + source statuses (live / stale / dark)
+//   6    near-duplicate clustering (engine/cluster.ts); retracted members leave their cluster
+//   7    common-cause grouping (engine/grouping.ts): lying gateways, rumor narratives
+//        -> evidence units
+//   8    stages of the causal chain seen; last tick's forecast confirmed / missed
+//   9    forward filter on the units that changed: prior -> posterior
+//   13   forecast the next 3 stages; one-step lookahead input
+//   10   decide: posterior + lookahead + hysteresis state -> action + expected cost
+//   14   explanation (template sentences)
 //   ---- on ANY error: count-threshold baseline, fallback = true (R11) ----
-//   9-10 build the TickRecord; the raw posterior becomes next tick's prior
+//   Step numbers follow the playbook; 11-12 (trust / drift learning) come in Phase 4.
+//   The new state (clusters, scores, forecast) is committed only if every step succeeded.
 //
 // The engine only ever sees what it is given: the PUBLIC registry and the
 // events handed to tick(). It never reads ground truth.
@@ -18,13 +24,30 @@
 import { type LLRow } from "../config/likelihoods";
 import { PRIOR } from "../config/priors";
 import { adaptEvent } from "./adapter";
+import { ClusterBook } from "./cluster";
 import { decide as defaultDecide, type DecisionConfig, type DecisionState, expectedCosts, initialDecisionState } from "./decide";
+import { explain, type UnitChange } from "./explain";
 import { fallbackDecision } from "./fallback";
-import { forwardFilter as defaultFilter, DEFAULT_FILTER_CONFIG, type FilterConfig } from "./filter";
+import { forwardFilter as defaultFilter, DEFAULT_FILTER_CONFIG, type FilterConfig, type UnitUpdate, zeroRow } from "./filter";
+import { checkForecasts, type ForecastState, forecastLines, initialForecastState, isBenign, lookahead, updateStages, visibleForecast } from "./forecast";
+import { applyWeatherCommonCause, detectGatewayGroups, type GatewayFlag, gatewaySensorCounts, isCorroborated, toUnit } from "./grouping";
 import { EventLog } from "./log";
 import { buildCleanedWindow, offsetEstimates } from "./order";
 import { SourceTracker, summarize } from "./source-status";
-import type { Event, ProbabilityVector, PublicRegistry, QuarantinedEvent, Seconds, SourceStatus, TickRecord } from "./types";
+import {
+  type Action,
+  type Event,
+  type EvidenceUnit,
+  type Explanation,
+  type ForecastItem,
+  HYPOTHESES,
+  type ProbabilityVector,
+  type PublicRegistry,
+  type QuarantinedEvent,
+  type Seconds,
+  type SourceStatus,
+  type TickRecord,
+} from "./types";
 import { validateEvent } from "./validate";
 
 export interface EngineOptions {
@@ -34,6 +57,9 @@ export interface EngineOptions {
   decisionConfig?: DecisionConfig;
 }
 
+const NOT_EVIDENCE = new Set(["heartbeat", "retraction"]);
+const sameRow = (a: LLRow, b: LLRow) => HYPOTHESES.every((h) => Math.abs(a[h] - b[h]) < 1e-12);
+
 export class Engine {
   readonly log = new EventLog();
   readonly errors: string[] = []; // every caught exception, "t=600: message"
@@ -41,18 +67,30 @@ export class Engine {
   private tracker: SourceTracker;
   private offsets: Map<string, Seconds>;
   private zones: Set<string>;
+  private registry: PublicRegistry;
+  private sensorCounts: Map<string, number>;
   private prior: ProbabilityVector = { ...PRIOR }; // raw posterior of the last good tick
   private decision: DecisionState = initialDecisionState();
-  private scored = new Map<string, LLRow>(); // event id -> what it added to the belief
+  // ---- Phase 3 state, replaced as a whole at the end of a successful tick ----
+  private book = new ClusterBook(); // every event that was scored, by unit
+  private scored = new Map<string, LLRow>(); // unit id -> what it currently adds to the belief
+  private processed = new Set<string>(); // event ids already put into a unit
+  private retractedSeen = new Set<string>(); // processed events whose retraction was applied
+  private gatewayFlags: GatewayFlag[] = [];
+  private gatewayIds = new Set<string>(); // event ids judged to be a lying gateway's readings
+  private forecastState: ForecastState = initialForecastState();
+  private last?: { probabilities: ProbabilityVector; action: Action; dark: number };
   private filter: typeof defaultFilter;
   private decideFn: typeof defaultDecide;
   private filterConfig: FilterConfig;
   private decisionConfig: DecisionConfig | undefined;
 
   constructor(registry: PublicRegistry, opts: EngineOptions = {}) {
+    this.registry = registry;
     this.tracker = new SourceTracker(registry);
     this.offsets = offsetEstimates(registry);
     this.zones = new Set(registry.zones.map((z) => z.zone_id));
+    this.sensorCounts = gatewaySensorCounts(registry);
     this.filter = opts.filter ?? defaultFilter;
     this.decideFn = opts.decide ?? defaultDecide;
     this.filterConfig = opts.filterConfig ?? DEFAULT_FILTER_CONFIG;
@@ -81,21 +119,137 @@ export class Engine {
     this.unparsedTotal += unparsed;
 
     try {
-      // 5. evidence window; events scored earlier but retracted since are withdrawn
-      const window = buildCleanedWindow(this.log, this.offsets, now, this.filterConfig.knobs.window_s, this.scored);
-      const withdrawnIds = [...this.scored.keys()].filter((id) => this.log.isRetracted(id));
-      // 6. who is still talking to us
+      // work on copies; commit at the end only if nothing throws
+      const book = this.book.clone();
+      const scored = new Map(this.scored);
+      const processed = new Set(this.processed);
+      const retractedSeen = new Set(this.retractedSeen);
+      const gatewayIds = new Set(this.gatewayIds);
+      const gatewayFlags = this.gatewayFlags.filter((f) => now - f.at <= 3600);
+      const fstate: ForecastState = structuredClone(this.forecastState);
+      const windowS = this.filterConfig.knobs.window_s;
+      const touched = new Set<string>(); // cluster ids changed this tick
+      const retractedNow = new Map<string, string[]>(); // cluster id -> event ids retracted this tick
+
+      // 5. who is still talking to us
       const statuses = this.tracker.statuses(now);
-      // 7. belief
-      const fr = this.filter(this.prior, window, statuses, this.filterConfig, withdrawnIds.map((id) => this.scored.get(id)!));
-      // 8. action
-      const d = this.decideFn(fr.posterior, this.decision, this.decisionConfig);
+      const summary = summarize(statuses);
+
+      // 6a. retractions of events already scored: the cluster shrinks (n -> n-1)
+      for (const id of [...processed].sort()) {
+        if (retractedSeen.has(id) || !this.log.isRetracted(id)) continue;
+        retractedSeen.add(id);
+        const c = book.retract(id);
+        if (!c) continue;
+        touched.add(c.id);
+        retractedNow.set(c.id, [...(retractedNow.get(c.id) ?? []), id]);
+      }
+
+      // 7a. lying gateways, found on the raw fresh events BEFORE causal context is built
+      const fresh = this.log.activeEvents(now - windowS, now).filter((e) => !NOT_EVIDENCE.has(e.kind) && !processed.has(e.id));
+      const groups = detectGatewayGroups(fresh, this.sensorCounts, gatewayFlags, now);
+      for (const g of groups) for (const id of g.ids) gatewayIds.add(id);
+
+      // 5b. the cleaned window (lying readings never make anything "chained")
+      const window = buildCleanedWindow(this.log, this.offsets, now, windowS, processed, gatewayIds);
+      const byId = new Map(window.map((e) => [e.id, e]));
+
+      // 7b. gateway groups become one unit each
+      for (const g of groups) {
+        const evs = g.ids.map((id) => byId.get(id)).filter((e) => e !== undefined);
+        if (evs.length === 0) continue;
+        const c = book.addGatewayGroup(g.gateway_id, g.value, evs, g.joinId);
+        if (!g.joinId) gatewayFlags.push({ gateway_id: g.gateway_id, value: g.value, unit_id: c.id, at: now });
+        touched.add(c.id);
+        for (const e of evs) processed.add(e.id);
+      }
+      // 6b. everything else: near-duplicate or narrative clusters (a lone event is a cluster of 1)
+      for (const e of window) {
+        if (!e.fresh || processed.has(e.id)) continue;
+        touched.add(book.add(e).id);
+        processed.add(e.id);
+      }
+      // 7c. rumor check: does a physical sensor back each live narrative? (sticky once yes)
+      const alive = book.all().filter((c) => touched.has(c.id) || (c.members.length > 0 && Math.max(...c.members.map((m) => m.arrived_at)) > now - windowS));
+      for (const c of alive) {
+        if (c.type === "narrative" && !c.corroborated && isCorroborated(c, window, gatewayIds)) {
+          c.corroborated = true;
+          touched.add(c.id);
+        }
+      }
+      const units = alive.map((c) => toUnit(c));
+
+      // 8. causal chain: stages seen (on the undiscounted units), last tick's forecast confirmed or missed
+      const freshKinds = updateStages(fstate, units, now);
+      const outcomes = checkForecasts(fstate, freshKinds, now, summary.coverage);
+
+      // 7d. rain + drainage + traffic of one zone = one weather event (changes weights for the filter only)
+      applyWeatherCommonCause(units);
+      const updates: UnitUpdate[] = units.map((u) => ({ unit: u, previous: scored.get(u.unit_id) ?? zeroRow() }));
+
+      // 9. belief
+      const fr = this.filter(this.prior, updates, statuses, this.filterConfig, outcomes.map((o) => o.ll));
+
+      // 13. forecast + lookahead
+      const lines = forecastLines(fstate, fr.posterior);
+      fstate.lines = lines;
+      const forecast: ForecastItem[] = visibleForecast(lines, fstate, now);
+      const la = lookahead(lines, fstate, fr.posterior, now, fr.coverage);
+
+      // 10. action
+      const d = this.decideFn(fr.posterior, this.decision, this.decisionConfig, la);
+
+      // 14. explanation
+      const changes: UnitChange[] = [];
+      for (const u of units) {
+        const before = scored.get(u.unit_id) ?? zeroRow();
+        const after = fr.contributions.get(u.unit_id) ?? before;
+        if (sameRow(before, after) && !retractedNow.has(u.unit_id)) continue;
+        const delta = zeroRow();
+        for (const h of HYPOTHESES) delta[h] = after[h] - before[h];
+        changes.push({ unit: u, delta, retracted: retractedNow.get(u.unit_id) ?? [] });
+      }
+      const lost = fresh
+        .filter((e) => e.kind === "gateway_heartbeat_lost")
+        .map((e) => e.gateway_id ?? e.source_id)
+        .filter((g, i, a) => a.indexOf(g) === i)
+        .map((g) => ({ gateway_id: g, sensors: this.sensorCounts.get(g) ?? 0 }));
+      const liveUnits = units.filter((u) => u.n > 0 && u.last_arrived_at > now - windowS);
+      const explanation: Explanation = explain({
+        now,
+        prev: this.last,
+        probabilities: fr.posterior,
+        action: d.action,
+        alive: liveUnits,
+        changes,
+        outcomes,
+        gatewaysLost: lost,
+        dark: summary.dark,
+        coverage: fr.coverage,
+        forecast,
+        benign: isBenign(fr.posterior),
+        chainSeen: Object.keys(fstate.seen).length,
+        lookahead: d.lookahead,
+        lookaheadKind: la?.kind,
+      });
 
       // commit the new state only after every step succeeded
-      for (const id of withdrawnIds) this.scored.delete(id);
-      for (const [id, ll] of fr.contributions) this.scored.set(id, ll);
+      for (const [id, ll] of fr.contributions) scored.set(id, ll);
+      for (const u of units) {
+        if (u.n > 0) continue;
+        book.drop(u.unit_id); // every member retracted: its contribution was just subtracted
+        scored.delete(u.unit_id);
+      }
+      this.book = book;
+      this.scored = scored;
+      this.processed = processed;
+      this.retractedSeen = retractedSeen;
+      this.gatewayFlags = gatewayFlags;
+      this.gatewayIds = gatewayIds;
+      this.forecastState = fstate;
       this.prior = fr.raw;
       this.decision = d.state;
+      this.last = { probabilities: fr.posterior, action: d.action, dark: summary.dark };
       return this.record(now, {
         probabilities: fr.posterior,
         action: d.action,
@@ -106,10 +260,24 @@ export class Engine {
         statuses,
         quarantined,
         unparsed,
+        forecast,
+        explanation,
+        evidence_units: liveUnits.length,
+        clusters: liveUnits.filter((u) => u.n >= 2).length,
       });
     } catch (err) {
       return this.fallbackTick(now, err, quarantined, unparsed);
     }
+  }
+
+  // The causal-chain state: stages seen, forecasts confirmed / missed (for traces and eval).
+  chain(): ForecastState {
+    return structuredClone(this.forecastState);
+  }
+
+  // Evidence units currently held (for traces and tests).
+  units(): EvidenceUnit[] {
+    return this.book.all().map((c) => ({ ...toUnit(c), hypothesis_contributions: this.scored.get(c.id) ?? zeroRow() }));
   }
 
   // R11: never crash mid-episode. Baseline probabilities, action capped at the previous one.
@@ -126,6 +294,7 @@ export class Engine {
       // statuses are informational here; leave them empty
     }
     const ec = expectedCosts(fb.probabilities);
+    this.last = { probabilities: fb.probabilities, action: fb.action, dark: this.last?.dark ?? 0 };
     return this.record(now, {
       probabilities: fb.probabilities,
       action: fb.action,
@@ -136,12 +305,23 @@ export class Engine {
       statuses,
       quarantined,
       unparsed,
+      forecast: [],
+      explanation: {
+        top_evidence: [],
+        delta_summary: `FALLBACK: the engine failed this tick, using the count-threshold baseline and holding at most ${fb.action}.`,
+        forecast_summary: "No forecast while in fallback.",
+      },
+      evidence_units: 0,
+      clusters: 0,
     });
   }
 
   private record(
     now: Seconds,
-    x: Pick<TickRecord, "probabilities" | "action" | "expected_cost" | "expected_costs" | "degraded" | "fallback" | "quarantined" | "unparsed"> & {
+    x: Pick<
+      TickRecord,
+      "probabilities" | "action" | "expected_cost" | "expected_costs" | "degraded" | "fallback" | "quarantined" | "unparsed" | "forecast" | "explanation" | "evidence_units" | "clusters"
+    > & {
       statuses: Record<string, SourceStatus>;
     },
   ): TickRecord {
@@ -151,9 +331,10 @@ export class Engine {
       action: x.action,
       expected_cost: x.expected_cost,
       expected_costs: x.expected_costs,
-      forecast: [], // Phase 3
-      top_evidence: [], // Phase 5
-      changes: [], // Phase 5
+      forecast: x.forecast,
+      explanation: x.explanation,
+      evidence_units: x.evidence_units,
+      clusters: x.clusters,
       degraded: x.degraded,
       fallback: x.fallback,
       source_statuses: x.statuses,

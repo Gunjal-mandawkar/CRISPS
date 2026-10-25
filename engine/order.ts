@@ -9,7 +9,8 @@
 //   3. sort by adjusted time (ties by id, so the order is deterministic)
 //   4. mark each event `chained` if its causal predecessor (config/likelihoods.ts
 //      `upstream`) was seen EARLIER in the window, and `fresh` if it has not
-//      been scored by the filter yet.
+//      been scored by the filter yet. Readings flagged as a lying gateway
+//      (engine/grouping.ts) never count as a predecessor.
 // Heartbeats and retractions are bookkeeping, not evidence, so they are left out.
 
 import { LIKELIHOODS, SEVERITY_GATE } from "../config/likelihoods";
@@ -28,6 +29,7 @@ export function buildCleanedWindow(
   now: Seconds,
   windowS: Seconds,
   scored: { has(id: string): boolean }, // ids the filter already scored
+  notContext: { has(id: string): boolean } = new Set<string>(), // e.g. a lying gateway's readings: never a causal predecessor
 ): CleanedEvent[] {
   const evidence = log.activeEvents(now - windowS, now).filter((e) => e.kind !== "heartbeat" && e.kind !== "retraction");
   const cleaned: CleanedEvent[] = evidence.map((e) => ({
@@ -45,7 +47,7 @@ export function buildCleanedWindow(
     let n = 0;
     for (const u of cleaned) {
       if (u.adjusted_occurred_at >= e.adjusted_occurred_at) break; // sorted: nothing earlier after this
-      if (!up.kinds.includes(u.kind) || !isStrong(u)) continue;
+      if (!up.kinds.includes(u.kind) || !isStrong(u) || notContext.has(u.id)) continue;
       if (up.scope === "zone" && u.zone_id !== e.zone_id) continue;
       n++;
     }
