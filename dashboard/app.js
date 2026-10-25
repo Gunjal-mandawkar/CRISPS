@@ -590,7 +590,9 @@ function startStream(paused = false) {
   let url;
   if (app.mode === "single") {
     S = freshSingle();
-    url = `/api/replay?split=${app.scenario.split}&episode=${app.scenario.episode}&${sp}`;
+    // The Cutout scenario asks for its demo-only DEGRADED threshold (0.8) in the URL; eval uses the default 0.5.
+    const deg = app.scenario.degradedBelow !== undefined ? `&degraded_threshold=${app.scenario.degradedBelow}` : "";
+    url = `/api/replay?split=${app.scenario.split}&episode=${app.scenario.episode}${deg}&${sp}`;
   } else if (app.mode === "twin") {
     T = freshTwin();
     url = `/api/twin?split=${app.scenario.split}&twin=${app.scenario.twin}&${sp}`;

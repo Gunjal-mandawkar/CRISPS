@@ -20,7 +20,7 @@ export interface Scenario {
   split: Split;
   episode?: string; // single mode
   twin?: string; // twin mode: the pair id
-  degradedBelow?: number; // demo-only DEGRADED threshold (engine default 0.5), see "cutout"
+  degradedBelow?: number; // demo-only DEGRADED threshold, sent as ?degraded_threshold= (engine default 0.5), see "cutout"
   expect: Expectation;
 }
 
@@ -34,8 +34,9 @@ export const SCENARIOS: Scenario[] = [
     mode: "twin",
     split: "test",
     twin: "test-twin-5221",
-    // No test or dev pair differs by > 0.1 within 3 min of the split (best: 0.068), because the next cascade
-    // stage needs ~2 min to start and 1-3 min to be reported. 5 minutes is the bar we check.
+    // 5 minutes, not the spec's 3: cascade stages take ~4 min to propagate; 3-minute divergence is unrealistic
+    // given the sim's lag distributions. No test or dev pair differs by > 0.1 within 3 min of the split (best: 0.068):
+    // the next stage needs ~2 min to start and 1-3 min to be reported. We check the honest 5 minutes, not a faked faster split.
     expect: { kind: "twin", divergeBy: 0.1, withinS: 300 },
   },
   {
@@ -99,9 +100,4 @@ export const SCENARIOS: Scenario[] = [
 
 export function findScenario(id: string): Scenario | undefined {
   return SCENARIOS.find((s) => s.id === id);
-}
-
-// The scenario that uses this episode (for the demo-only DEGRADED threshold).
-export function scenarioForEpisode(split: string, episode: string): Scenario | undefined {
-  return SCENARIOS.find((s) => s.split === split && s.episode === episode);
 }

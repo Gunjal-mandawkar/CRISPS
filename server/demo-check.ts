@@ -25,6 +25,8 @@ export function checkScenario(s: Scenario): CheckResult {
   const out = (pass: boolean, detail: string) => ({ id: s.id, label: s.label, pass, detail });
   const e = s.expect;
   if (e.kind === "twin") {
+    // The twin window is 5 minutes (scenarios.ts), not the spec's 3: cascade stages take ~4 min to
+    // propagate; 3-minute divergence is unrealistic given the sim's lag distributions.
     const [a, b] = loadTwinPair(s.split, s.twin!);
     const ra = runAll(a).map((p) => p.record);
     const rb = runAll(b).map((p) => p.record);
@@ -53,7 +55,7 @@ export function checkScenario(s: Scenario): CheckResult {
     const first = rs.find((r) => level(r.action) >= level(e.min));
     return out(first !== undefined, `highest action ${top}; first ${e.min}+ at ${first ? mmss(first.tick_time) : "never"}`);
   }
-  // degraded
+  // degraded (the same threshold the dashboard sends as ?degraded_threshold= for this scenario)
   const deg = rs.filter((r) => r.degraded);
   const minCov = Math.min(...ticks.map((p) => p.coverage_weighted));
   const threshold = s.degradedBelow ?? 0.5;

@@ -2,6 +2,8 @@
 // Express server for the demo dashboard. `npm run dev` runs this file.
 //   GET  /api/scenarios                        the demo scenarios (server/scenarios.ts)
 //   GET  /api/replay?split=&episode=&speed=    SSE: episode-start, tick (one per minute), episode-end
+//        &degraded_threshold=0.8               optional: show DEGRADED below this trust-weighted coverage
+//                                             (default: the engine knob FILTER_KNOBS.degraded_below_coverage, 0.5)
 //   GET  /api/twin?split=&twin=&speed=         SSE: both twins in lockstep: tick-left, tick-right, split
 //   GET  /api/prior-shift?speed=               SSE: episode-summary after each of the 100 episodes
 //   GET  /api/eval?split=                      the eval table (same numbers as `npm run eval`)
@@ -14,13 +16,14 @@
 import express, { type Request, type Response } from "express";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
+import { FILTER_KNOBS } from "../config/knobs";
 import { DRIFT_KNOBS } from "../config/priors";
 import { groupOf, type Split } from "../sim/dataset";
 import { evalView } from "./eval-cache";
 import { isSplit, loadEpisode, loadTwinPair } from "./episodes";
 import { priorShiftRun } from "./prior-shift";
 import { EpisodeRunner, truthReveal } from "./runner";
-import { SCENARIOS, scenarioForEpisode } from "./scenarios";
+import { SCENARIOS } from "./scenarios";
 import { newPlayer, openSse, parseSpeed, targets } from "./stream";
 
 const str = (x: unknown) => (typeof x === "string" ? x : "");
@@ -30,6 +33,17 @@ function splitOf(req: Request, res: Response): Split | undefined {
   if (isSplit(s)) return s;
   res.status(400).json({ error: `unknown split ${s}` });
   return undefined;
+}
+
+// Optional ?degraded_threshold=<0..1>: a demo-only DEGRADED threshold (the Cutout scenario
+// sends 0.8). Missing = undefined = the engine default. Bad value = 400 and null.
+function degradedThreshold(req: Request, res: Response): number | undefined | null {
+  const raw = str(req.query.degraded_threshold);
+  if (raw === "") return undefined;
+  const x = Number(raw);
+  if (Number.isFinite(x) && x > 0 && x <= 1) return x;
+  res.status(400).json({ error: `degraded_threshold must be a number in (0, 1], got ${raw}` });
+  return null;
 }
 
 // What the dashboard may know at the start: the public city and the clock. Not the type.
@@ -48,11 +62,13 @@ async function replay(req: Request, res: Response): Promise<void> {
     res.status(404).json({ error: (e as Error).message });
     return;
   }
-  const scenario = scenarioForEpisode(split, id);
-  const runner = new EpisodeRunner(ep, { degradedBelow: scenario?.degradedBelow });
+  const degradedBelow = degradedThreshold(req, res);
+  if (degradedBelow === null) return;
+  const runner = new EpisodeRunner(ep, { degradedBelow });
   const send = openSse(res);
   const player = newPlayer(req, res, parseSpeed(req.query.speed), req.query.paused === "1");
-  send("episode-start", episodeStart(ep, split, { stream_id: player.id, degraded_threshold: scenario?.degradedBelow ?? 0.5, demo_threshold: scenario?.degradedBelow !== undefined }));
+  const threshold = degradedBelow ?? FILTER_KNOBS.degraded_below_coverage;
+  send("episode-start", episodeStart(ep, split, { stream_id: player.id, degraded_threshold: threshold, demo_threshold: threshold !== FILTER_KNOBS.degraded_below_coverage }));
   while (!runner.done() && !player.closed) {
     await player.gate();
     if (player.closed) break;
