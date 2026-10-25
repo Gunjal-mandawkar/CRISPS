@@ -3,11 +3,11 @@
 // "all events with arrived_at <= now" (R8) and rebuilds belief from scratch.
 // Filled in: Phase 2.
 
-import type { Event, Minutes } from "./types";
+import type { Event, Seconds } from "./types";
 
 export interface EventLog {
   append(event: Event): void;
-  visibleAt(now: Minutes): Event[];
+  visibleAt(now: Seconds): Event[];
 }
 
 export function createEventLog(): EventLog {

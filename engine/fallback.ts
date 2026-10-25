@@ -3,8 +3,8 @@
 // HOLD the previous action (never jump up), and set fallback = true.
 // Filled in: Phase 3.
 
-import type { Action, Event, Minutes, TickRecord } from "./types";
+import type { Action, Event, Seconds, TickRecord } from "./types";
 
-export function fallbackTick(events: Event[], now: Minutes, previousAction: Action): TickRecord {
+export function fallbackTick(events: Event[], now: Seconds, previousAction: Action): TickRecord {
   throw new Error("not implemented: fallbackTick (Phase 3)");
 }

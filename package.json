@@ -5,7 +5,7 @@
   "type": "module",
   "description": "The First 10 Minutes: online crisis prediction and decision system (hackathon).",
   "scripts": {
-    "sim": "tsx sim/scenarios.ts",
+    "sim": "tsx sim/cli.ts",
     "eval": "tsx eval/harness.ts",
     "dev": "tsx server/index.ts",
     "test": "vitest run",
