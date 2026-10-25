@@ -8,7 +8,33 @@ Every simulated minute it reads a messy multi-source event stream and outputs:
 3. a forecast of the next 3 events with time windows
 4. a plain-language explanation of why the belief or action changed
 
-Full spec: [docs/SPEC.md](docs/SPEC.md). Status: **Phase 4 done (one gate item missed, see the report)**: learning between episodes (per-source Beta trust with forgetting, learned base rates with decay, CUSUM drift detector), dev-tuned likelihood tables and measured forecast lags (`npm run tune`), trust-weighted DEGRADED, and the prior-shift evaluation. On the test split the tuned engine beats the hand-set one on Brier (0.414 vs 0.427) and both beat count-threshold on Brier, false alarms (2.5% vs 34.8%) and cost (2.62 vs 7.73 per tick). Learning the base rate moves the prior as designed on the prior-shift sequence (P(cascade) 0.06 at episode 25, 0.22 at 75) but does not lower Brier there (0.401 vs 0.397 static). Lead time is still behind count-threshold (-6.2 vs -3.9 min). Phase reports: [docs/phase-reports/](docs/phase-reports/).
+Full spec: [docs/SPEC.md](docs/SPEC.md). Status: **Phase 5 done**: a local demo dashboard (vanilla HTML/JS) fed by an Express server over Server-Sent Events, with Single, Twin, Prior-Shift and Eval modes, six pre-picked demo scenarios and `npm run demo-check`. No engine logic changed in Phase 5. Phase 4 results still stand: on the test split the tuned engine beats the hand-set one on Brier (0.414 vs 0.427) and both beat count-threshold on Brier, false alarms (2.5% vs 34.8%) and cost (2.62 vs 7.73 per tick). Learning the base rate moves the prior as designed on the prior-shift sequence (P(cascade) 0.06 at episode 25, 0.22 at 75) but does not lower Brier there (0.401 vs 0.397 static). Lead time is still behind count-threshold (-6.2 vs -3.9 min). Phase reports: [docs/phase-reports/](docs/phase-reports/).
+
+## How to run the demo
+
+```bash
+npm install
+npm run sim -- --build      # builds data/episodes/ (gitignored), about 15 s
+npm run eval -- --split test --policy engine   # optional: fills the Eval tab cache (else the server runs it on first open, ~40 s)
+npm run dev                 # starts the server on port 3000 (PORT=xxxx to change)
+# open http://localhost:3000
+npm run demo-check          # replays the 6 demo scenarios silently and checks each one
+```
+
+Pick a scenario, press Play (or Space), and watch. Speed 1x = 1 s per simulated minute, 4x = 250 ms (a 45-minute episode in about 11 s).
+Keys: Space play/pause, Right arrow = next tick while paused, R reset, 1 / 2 / 4 speed. Hover the belief timeline for exact numbers,
+click an event in the feed to see its evidence unit in "Why it changed", click a source type in "Source trust" for its trust over the episode.
+
+| Mode | What it shows |
+|---|---|
+| Single | Probability bars, action badge + expected cost, stacked belief timeline, forecast (pending / confirmed / missed), why it changed, event feed (DUP, RET, Q, cluster badges), source trust, DEGRADED / FALLBACK banners |
+| Twin | Both twins side by side in lockstep, SPLIT line, pre-split identity check, first divergence with both explanations |
+| Prior-Shift | The learned P(cascade) prior over 100 episodes, true hypothesis dots, running Brier adaptive vs static, CUSUM status |
+| Eval | always-watch, count-threshold, engine (hand-set), engine (tuned) on every metric, breakdown by episode type |
+
+Demo scenarios (all from the test split, `server/scenarios.ts`): Twin Test (test-twin-5221), Gateway Outage + Rumor Wave (test-sensor_failure-5045, a lying gateway), Cutout (test-cutout-5234), Real Cascade (test-cascade-5139), Rain Only (test-rain_only-5170), Rumor Wave (test-rumor_wave-5250).
+The Cutout scenario shows DEGRADED with a **demo-only threshold of 80%** trust-weighted coverage (engine default 50%, which no simulated cutout reaches); the banner says so.
+Every replay is a cold start (configured base rates, type-prior trust), like the first episode of an eval run.
 
 ## Architecture
 
@@ -37,8 +63,8 @@ place (besides sim/) that reads ground truth.
 | `engine/` | The decision engine. Never imports `sim/` |
 | `sim/` | Simulator and simulator-only truth types (`sim/truth.ts`) |
 | `eval/` | Metrics, baselines, harness |
-| `server/` | Express + Server-Sent Events |
-| `dashboard/` | Vanilla HTML/JS page |
+| `server/` | Express + Server-Sent Events: replay, twin, prior-shift, eval, demo scenarios, `demo-check` |
+| `dashboard/` | Vanilla HTML/JS/CSS dashboard (`index.html`, `app.js`, `style.css`), canvas charts, no framework |
 | `tests/` | Vitest unit tests |
 | `docs/` | Spec and notes |
 
@@ -73,7 +99,8 @@ npx tsx eval/trace.ts --split test --episode test-cascade-5120 --detail 5,10,15 
 npx tsx eval/trace.ts --split test --twin test-twin-5200         # twin pair side by side, identity check up to the split
 npx tsx eval/separability.ts --split dev        # how separable cascades vs lookalikes are, minute by minute
 
-npm run dev        # Phase 5
+npm run dev          # demo server + dashboard on http://localhost:3000
+npm run demo-check   # smoke test of the 6 demo scenarios
 ```
 
 Requires Node 22.12+ (tested on Node 22.22).
@@ -100,15 +127,24 @@ Requires Node 22.12+ (tested on Node 22.22).
 | R9 | Clock skew | partial: hidden per-source offsets (+/- 2 min) in the simulator; the engine orders with a 2-min tolerance using nominal latency, no per-source offset learning yet |
 | R10 | Near-duplicate clustering | done: same zone + kind within 3 min, weight 1 + ln(n), surge protection (n >= 30, value sd > 3), retraction at cluster level |
 | R11 | Safe fallback | done: try/catch around steps 5-8, count-threshold baseline, action capped at the previous one, FALLBACK flag, fallback ticks in eval |
-| R12 | Demo mode | seeded deterministic scenarios exist; demo scripts in Phase 6 |
+| R12 | Demo mode | done: local dashboard over SSE (Single / Twin / Prior-Shift / Eval), 6 seeded demo scenarios from the test split, `npm run demo-check`. Cutout scenario uses a demo-only DEGRADED threshold (0.8) |
 
 ## LIMITATIONS
 
-Full write-up in Phase 6. Known so far (Phase 4):
+Read these before trusting any number in this repo.
 
-- **Calibrated against its own simulator.** The likelihood tables are tuned on dev episodes and the forecast lags are measured on dev cascades, and both come from the simulator we wrote. A good score says the engine fits our simulator; it says nothing yet about a real city. In a real deployment, tuning on data generated from your own assumptions would be circular. For a competition with a fixed simulator, tuning on dev and reporting test is the right method.
-- **Lead time is poor** (-6.2 min on test: the first ALERT comes about 6 minutes after the first hospital stage). In the simulator, cascades and lookalikes look alike until the cascade diverges, which happens late. Tuning did not change that.
-- **Learning the base rate did not help Brier** on the prior-shift sequence (0.401 vs 0.397 static, episodes 51-100) or on 10 dev-seeded copies of it (adaptive worse on 9 of 10). The prior moves as designed. A 20-episode memory is noisy, and in our simulator the evidence soon outweighs the prior.
-- **Per-source trust learns source TYPES, not individual sources.** The simulator draws each source's reliability fresh every episode, so a source id has no lasting personality to learn. Citizen channels end up mid-table (0.71), because in the simulator they rarely make loud false reports outside the few rumor waves.
-- **DEGRADED never fires on simulated data.** No simulated cutout removes enough trust-weighted coverage to drop below 0.5. The rule is unit-tested on a hand-made city.
+1. **The data is synthetic.** Every episode comes from our own simulator (`sim/`). Calibration (Brier 0.414 on test) is verified only on that simulator; it says nothing yet about a real city. The likelihood tables are tuned on dev episodes and the forecast lags are measured on dev cascades, so a good score means "fits our simulator".
+2. **The causal graph and likelihoods are hand-specified, not discovered.** The chain rain -> drainage -> traffic -> calls -> hospitals -> power, its lags and every likelihood table were written by hand (then nudged by a small dev-set tuner). Nothing was learned from real incident data.
+3. **Learning is lightweight.** Per-source Beta trust counts, base rates from decayed counts and a CUSUM drift detector; no deep learning. Learning the base rate did not lower Brier on the prior-shift sequence (0.401 vs 0.397 static, episodes 51-100), and trust learns source types rather than individual sources.
+4. **City-wide decision only.** One action for the whole city; there is no per-zone action, even though evidence is tracked per zone.
+5. **Full recompute per tick.** Each tick re-clusters the 15-minute window and rescores changed units. That is fine at simulator scale (~1,200 events per 45-minute episode, ~100 sources) but would not scale to a real city's event volume without incremental indexes.
+6. **No LLM in the core loop.** Explanations are template sentences filled from the evidence units; they can be clumsy ("Little change: 15 evidence unit(s) updated") but they never invent anything.
+7. **A different cost model or data format needs recalibration.** Organizers may use another cost model or event schema. The adapter (`engine/adapter.ts`) can map schema differences, but the likelihoods, thresholds and costs would need to be re-tuned on their data.
+8. **Lead time is negative.** On test the first ALERT comes about 6 minutes after the critical time (-6.2 min; count-threshold -3.9). In the simulator, cascades and their lookalikes diverge late, so a calibrated engine cannot commit early without false alarms. This is a limit of the scenario design as much as of the engine.
+
+Also known:
+
+- **DEGRADED never fires at the engine's default threshold on simulated data.** No simulated cutout drops trust-weighted coverage below 0.5 (lowest on test: 0.74). The demo's Cutout scenario raises the threshold to 0.8 for that scenario only.
+- **Twin divergence takes about 4-5 minutes.** After the split, the next cascade stage needs ~2 minutes to start and 1-3 minutes to be reported, so no twin pair (test or dev) differs by more than 0.1 within 3 minutes; the best demo pair differs by 0.64 within 5 minutes.
 - **Dev/test benchmark mix**: dev and test are about 28% cascades by construction, against a configured base rate of 10%. The tuner was constrained (do-no-harm rules) so that it could not buy Brier with extra false alarms.
+- **Per-source trust learns source TYPES, not individual sources.** The simulator draws each source's reliability fresh every episode, so a source id has no lasting personality to learn.
