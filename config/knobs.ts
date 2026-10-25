@@ -5,26 +5,43 @@ export const KNOBS = {
   // Hysteresis (R6)
   escalate_consecutive_ticks: 2, // optimal action must be higher for 2 ticks in a row
   deescalate_consecutive_ticks: 4, // ...and lower for 4 ticks before stepping down
-  deescalate_max_p_cascade: 0.1, // only step down if P(cascade) is below this
+  // Step down one level only if P(cascade) is below the threshold for that step.
+  deescalate_max_p_cascade: { ESCALATE: 0.5, ALERT: 0.3, PREPARE: 0.15 } as Record<string, number>,
   min_dwell_ticks: 3, // stay at least 3 ticks on any action
-  fast_commit_p_cascade: 0.9, // skip waiting if P(cascade) is above this
+  fast_commit_p_cascade: 0.9, // above this, jump straight to ESCALATE
 
   // Rumor waves: a single narrative cluster counts as at most this many
-  // "weak sensor" evidence units unless physically corroborated.
+  // "weak sensor" evidence units unless physically corroborated. (Phase 3)
   rumor_cap_units: 1,
 
-  // Near-duplicate clustering (R10): same zone + kind within this window.
+  // Near-duplicate clustering (R10): same zone + kind within this window. (Phase 3)
   near_dup_window_minutes: 2,
 
-  // Clock skew tolerance when ordering events (R9).
+  // Clock skew tolerance when ordering events (R9). (Phase 3)
   skew_tolerance_minutes: 2,
 
-  // A source is "stale" / "dark" after this many silent minutes (R5).
-  stale_after_minutes: 3,
-  dark_after_minutes: 5,
+  // Source status (R5), in multiples of the source's heartbeat interval:
+  // live under 2x, stale 2x..4x, dark 4x+ (or its gateway reported lost).
+  stale_after_intervals: 2,
+  dark_after_intervals: 4,
 
-  // Calibration temperature (fit on dev seeds in Phase 2). 1 = no change.
+  // Calibration temperature (fit on dev seeds later). 1 = no change.
   temperature: 1,
+};
+
+// Forward filter (engine/filter.ts) and tick runner (engine/tick.ts).
+export const FILTER_KNOBS = {
+  window_s: 15 * 60, // the cleaned window: events that arrived in the last 15 minutes
+  // Trust tempering: each event's log-likelihood is multiplied by its source's trust.
+  // Flat for now; per-source Beta trust replaces this in Phase 4.
+  trust: { citizen_report: 0.7, default: 1.0 } as Record<string, number>,
+  // Silence: each tick, every dark source adds this much log-likelihood to
+  // SENSOR_FAILURE (stale sources half of it). Capped per tick so a big outage
+  // does not shout louder than the "gateway lost" event itself.
+  silence_dark_ll: 0.02,
+  silence_stale_ll: 0.01,
+  silence_cap_ll: 0.3,
+  degraded_below_coverage: 0.7, // DEGRADED flag when live coverage drops below this
 };
 
 // Naive count-threshold baseline (engine/baseline.ts), also the future FALLBACK (R11).

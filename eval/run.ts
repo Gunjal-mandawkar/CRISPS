@@ -6,7 +6,7 @@ import { BASE_RATES } from "../config/transitions";
 import { ACTIONS, type Event, HYPOTHESES, type TickRecord } from "../engine/types";
 import { groupOf } from "../sim/dataset";
 import type { Episode } from "../sim/truth";
-import type { Policy } from "./baselines";
+import type { Policy, PolicyOutput } from "./baselines";
 import { brierScore, flipFlops, level, logLoss, mean, sqDistance, tickCost } from "./metrics";
 
 export const COMMIT_P = 0.6; // "committed" = top hypothesis is the truth with p >= 0.6
@@ -30,11 +30,12 @@ export interface EpisodeResult {
   commit_min?: number | null; // minutes after the split until committed to the truth (null = never)
 }
 
-function makeRecord(t: number, out: ReturnType<Policy["decide"]>): TickRecord {
+function makeRecord(t: number, out: PolicyOutput): TickRecord {
   return {
     tick_time: t,
     probabilities: out.probabilities,
     action: out.action,
+    expected_cost: NaN,
     expected_costs: { WATCH: NaN, PREPARE: NaN, ALERT: NaN, ESCALATE: NaN }, // baselines do not compute these
     forecast: [],
     top_evidence: [],
@@ -42,9 +43,11 @@ function makeRecord(t: number, out: ReturnType<Policy["decide"]>): TickRecord {
     degraded: false,
     fallback: false,
     source_statuses: {},
+    source_summary: { live: 0, stale: 0, dark: 0, total: 0, coverage: 1 },
     trust: [],
     retroactive_revisions: [],
-    quarantined_ids: [],
+    quarantined: [],
+    unparsed: 0,
   };
 }
 
@@ -52,11 +55,13 @@ export function runEpisode(policy: Policy, ep: Episode): { records: TickRecord[]
   const truth = ep.truth;
   const byArrival = ep.events.slice().sort((a, b) => a.arrived_at - b.arrived_at);
   const records: TickRecord[] = [];
+  const step = policy.start?.(ep.registry); // stateful policies (the engine) get only new arrivals
   let cut = 0;
   for (let t = 60; t <= ep.duration; t += 60) {
+    const prev = cut;
     while (cut < byArrival.length && byArrival[cut].arrived_at <= t) cut++;
-    const visible: Event[] = byArrival.slice(0, cut); // future events are never passed in
-    records.push(makeRecord(t, policy.decide(visible, t, ep.registry)));
+    if (step) records.push(step(byArrival.slice(prev, cut), t));
+    else records.push(makeRecord(t, policy.decide!(byArrival.slice(0, cut), t, ep.registry))); // future events are never passed in
   }
 
   const h = truth.hypothesis;

@@ -1,22 +1,22 @@
 // config/transitions.ts
 // Transition matrix for the forward filter: P(hypothesis next minute | hypothesis now).
-// Rows sum to 1. Mostly "stay put", with a small chance of change.
-// Placeholder values, hand-set, tune later (Phase 2).
+// Rows sum to 1.
+//
+// Each episode has ONE true situation, so the belief should mostly "stay put".
+// Every minute we let a small share FORGET of it drift back to the base rates:
+//   T[a][b] = (1 - FORGET) * (a == b ? 1 : 0) + FORGET * PRIOR[b]
+// With no evidence at all, the belief slowly returns to the base rates (never
+// to some arbitrary hypothesis), and an early mistake can be undone.
+// Hand-set, tune later.
 
-import type { Hypothesis } from "../engine/types";
+import { HYPOTHESES, type Hypothesis } from "../engine/types";
+import { PRIOR } from "./priors";
 
-export const TRANSITIONS: Record<Hypothesis, Record<Hypothesis, number>> = {
-  NOISE:             { NOISE: 0.97, SENSOR_FAILURE: 0.01, ISOLATED_INCIDENT: 0.01, CASCADING_CRISIS: 0.01 },
-  SENSOR_FAILURE:    { NOISE: 0.01, SENSOR_FAILURE: 0.97, ISOLATED_INCIDENT: 0.01, CASCADING_CRISIS: 0.01 },
-  ISOLATED_INCIDENT: { NOISE: 0.01, SENSOR_FAILURE: 0.01, ISOLATED_INCIDENT: 0.96, CASCADING_CRISIS: 0.02 },
-  CASCADING_CRISIS:  { NOISE: 0.00, SENSOR_FAILURE: 0.00, ISOLATED_INCIDENT: 0.01, CASCADING_CRISIS: 0.99 },
-};
+export const FORGET = 0.02;
 
-// Starting base rates (prior) before any evidence. Learned later (R4).
-// Placeholder, hand-set, tune later.
-export const BASE_RATES: Record<Hypothesis, number> = {
-  NOISE: 0.6,
-  SENSOR_FAILURE: 0.15,
-  ISOLATED_INCIDENT: 0.17,
-  CASCADING_CRISIS: 0.08,
-};
+export const TRANSITIONS: Record<Hypothesis, Record<Hypothesis, number>> = Object.fromEntries(
+  HYPOTHESES.map((a) => [a, Object.fromEntries(HYPOTHESES.map((b) => [b, (1 - FORGET) * (a === b ? 1 : 0) + FORGET * PRIOR[b]]))]),
+) as Record<Hypothesis, Record<Hypothesis, number>>;
+
+// Kept under its old name: always-WATCH and the twin-test metric use it.
+export const BASE_RATES: Record<Hypothesis, number> = PRIOR;
