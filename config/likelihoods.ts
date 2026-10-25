@@ -92,3 +92,16 @@ export const LIKELIHOODS: Partial<Record<EventKind, KindLikelihood>> = {
 // produces them all the time. They get LOW_SEVERITY instead of their kind's row.
 export const SEVERITY_GATE = { strong: 0.5 };
 export const LOW_SEVERITY: LLRow = row(0.02, 0, 0, -0.01);
+
+// ---- Phase 3: special rows for grouped evidence (engine/grouping.ts) ----
+
+// Gateway perfect-correlation: 5+ sensors behind ONE gateway report the exact
+// same value in the same minute. Real floods do not do that; a broken or lying
+// gateway does. One such group = one strong "the gateway is lying" unit,
+// and almost impossible under a real cascade.
+export const GATEWAY_CORRELATED: LLRow = row(0, 2.0, -0.5, -1.5);
+
+// Uncorroborated narrative cluster (a probable rumor): many citizens repeating
+// one story with no physical sensor seeing anything in that zone. Counted as
+// ONE weak unit: slightly "something local", almost nothing toward cascade.
+export const RUMOR_CAPPED: LLRow = row(0, -0.1, 0.07, 0);

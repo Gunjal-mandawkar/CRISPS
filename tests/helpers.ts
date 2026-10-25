@@ -1,7 +1,7 @@
 // tests/helpers.ts
 // A tiny hand-made city for engine unit tests (no simulator needed).
 
-import type { Event, PublicRegistry } from "../engine/types";
+import type { CleanedEvent, Event, PublicRegistry } from "../engine/types";
 
 export const REGISTRY: PublicRegistry = {
   zones: [
@@ -32,4 +32,10 @@ export function ev(extra: Partial<Event> & Pick<Event, "arrived_at">): Event {
     reported_severity: 0.8,
     ...extra,
   };
+}
+
+// A cleaned event (as engine/order.ts would produce it), for cluster / grouping tests.
+export function ce(extra: Partial<CleanedEvent> & Pick<Event, "arrived_at">): CleanedEvent {
+  const e = ev(extra);
+  return { adjusted_occurred_at: e.occurred_at, chained: false, fresh: true, ...e, ...extra } as CleanedEvent;
 }

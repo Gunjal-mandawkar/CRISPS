@@ -25,6 +25,9 @@ export interface Summary {
   twin_commit_benign_min: number;
   twin_commit_benign_never: number;
   fallback_ticks: number;
+  forecast_items: number; // cascade episodes only
+  forecast_accuracy: number; // share of forecast lines with a real event of that kind inside their window
+  forecast_start_accuracy: number; // stricter: share whose stage truly STARTED inside the window
 }
 
 // "Benign" = nothing real is happening: NOISE or SENSOR_FAILURE truth.
@@ -58,6 +61,9 @@ export function summarize(rs: EpisodeResult[]): Summary {
     twin_commit_benign_min: mean(done(commits("benign"))),
     twin_commit_benign_never: commits("benign").length - done(commits("benign")).length,
     fallback_ticks: rs.reduce((s, r) => s + r.fallback_ticks, 0),
+    forecast_items: rs.reduce((s, r) => s + (r.forecast_items ?? 0), 0),
+    forecast_accuracy: rs.reduce((s, r) => s + (r.forecast_hits ?? 0), 0) / rs.reduce((s, r) => s + (r.forecast_items ?? 0), 0),
+    forecast_start_accuracy: rs.reduce((s, r) => s + (r.forecast_start_hits ?? 0), 0) / rs.reduce((s, r) => s + (r.forecast_items ?? 0), 0),
   };
 }
 
@@ -88,6 +94,7 @@ export function formatReport(policy: string, split: string, s: Summary, groups: 
   L.push(`  Twin: pre-split overconfidence (0 = base rates)  ${f(s.twin_pre_split_overconf)}`);
   L.push(`  Twin: time-to-commit after split (p>=${COMMIT_P}, min)  cascade ${f(s.twin_commit_cascade_min, 2)} (never: ${s.twin_commit_cascade_never}), benign ${f(s.twin_commit_benign_min, 2)} (never: ${s.twin_commit_benign_never})`);
   L.push(`  Fallback ticks                                   ${s.fallback_ticks}`);
+  L.push(`  Forecast accuracy (cascades: real event in window) ${pct(s.forecast_accuracy)}   (${s.forecast_items} distinct forecast lines; stricter "stage started in window": ${pct(s.forecast_start_accuracy)})`);
   L.push("");
   L.push(`${"group".padEnd(26)} ${pad("n", 3)} ${pad("truth", 9)} ${pad("Brier", 6)} ${pad("LogLoss", 7)} ${pad("Cost/tick", 9)} ${pad("ALERT+", 7)} ${pad("Lead(min)", 9)} ${pad("Flips", 5)}`);
   for (const [g, rs] of groups) {
@@ -107,9 +114,9 @@ const short = (h: string) => ({ NOISE: "NOISE", SENSOR_FAILURE: "SENS", ISOLATED
 export function formatComparison(split: string, rows: [string, Summary][]): string {
   const L: string[] = [];
   L.push(`Policy comparison, split ${split}`);
-  L.push(`${"policy".padEnd(16)} ${pad("Brier", 6)} ${pad("LogLoss", 7)} ${pad("Cost/tick", 9)} ${pad("FalseAlarm", 10)} ${pad("Lead(min)", 9)} ${pad("Flips", 5)} ${pad("Fallback", 8)}`);
+  L.push(`${"policy".padEnd(16)} ${pad("Brier", 6)} ${pad("LogLoss", 7)} ${pad("Cost/tick", 9)} ${pad("FalseAlarm", 10)} ${pad("Lead(min)", 9)} ${pad("Flips", 5)} ${pad("Fallback", 8)} ${pad("Forecast", 8)}`);
   for (const [n, s] of rows) {
-    L.push(`${n.padEnd(16)} ${pad(f(s.brier), 6)} ${pad(f(s.log_loss), 7)} ${pad(f(s.cost_per_tick, 2), 9)} ${pad(pct(s.false_alarm_rate), 10)} ${pad(f(s.mean_lead_min, 2), 9)} ${pad(s.flips_total, 5)} ${pad(s.fallback_ticks, 8)}`);
+    L.push(`${n.padEnd(16)} ${pad(f(s.brier), 6)} ${pad(f(s.log_loss), 7)} ${pad(f(s.cost_per_tick, 2), 9)} ${pad(pct(s.false_alarm_rate), 10)} ${pad(f(s.mean_lead_min, 2), 9)} ${pad(s.flips_total, 5)} ${pad(s.fallback_ticks, 8)} ${pad(pct(s.forecast_accuracy), 8)}`);
   }
   const e = rows.find(([n]) => n === "engine")?.[1];
   const c = rows.find(([n]) => n === "count-threshold")?.[1];
