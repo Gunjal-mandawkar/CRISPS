@@ -10,7 +10,8 @@
     "dev": "tsx server/index.ts",
     "test": "vitest run",
     "typecheck": "tsc --noEmit",
-    "tune": "tsx eval/tune.ts"
+    "tune": "tsx eval/tune.ts",
+    "demo-check": "tsx server/demo-check.ts"
   },
   "dependencies": {
     "express": "^5.3.0"
