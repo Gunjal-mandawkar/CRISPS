@@ -102,3 +102,22 @@ export function formatReport(policy: string, split: string, s: Summary, groups: 
 }
 
 const short = (h: string) => ({ NOISE: "NOISE", SENSOR_FAILURE: "SENS", ISOLATED_INCIDENT: "ISO", CASCADING_CRISIS: "CASC" })[h] ?? h;
+
+// One row per policy, then the engine-vs-count-threshold deltas (negative = engine lower = better).
+export function formatComparison(split: string, rows: [string, Summary][]): string {
+  const L: string[] = [];
+  L.push(`Policy comparison, split ${split}`);
+  L.push(`${"policy".padEnd(16)} ${pad("Brier", 6)} ${pad("LogLoss", 7)} ${pad("Cost/tick", 9)} ${pad("FalseAlarm", 10)} ${pad("Lead(min)", 9)} ${pad("Flips", 5)} ${pad("Fallback", 8)}`);
+  for (const [n, s] of rows) {
+    L.push(`${n.padEnd(16)} ${pad(f(s.brier), 6)} ${pad(f(s.log_loss), 7)} ${pad(f(s.cost_per_tick, 2), 9)} ${pad(pct(s.false_alarm_rate), 10)} ${pad(f(s.mean_lead_min, 2), 9)} ${pad(s.flips_total, 5)} ${pad(s.fallback_ticks, 8)}`);
+  }
+  const e = rows.find(([n]) => n === "engine")?.[1];
+  const c = rows.find(([n]) => n === "count-threshold")?.[1];
+  if (e && c) {
+    const d = (x: number, unit = "", digits = 3) => `${x >= 0 ? "+" : ""}${x.toFixed(digits)}${unit} (${x < 0 ? "engine better" : x > 0 ? "engine worse" : "tie"})`;
+    const wins = [e.brier < c.brier, e.false_alarm_rate < c.false_alarm_rate, e.cost_per_tick < c.cost_per_tick].filter(Boolean).length;
+    L.push("");
+    L.push(`engine vs count-threshold: Brier ${d(e.brier - c.brier)}, false-alarm rate ${d(100 * (e.false_alarm_rate - c.false_alarm_rate), " pts", 1)}, cost/tick ${d(e.cost_per_tick - c.cost_per_tick, "", 2)}  -> engine wins ${wins}/3`);
+  }
+  return L.join("\n");
+}

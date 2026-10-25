@@ -13,10 +13,14 @@ export const HYPOTHESES = [
 ] as const;
 export type Hypothesis = (typeof HYPOTHESES)[number];
 
+// A probability for each hypothesis. Always sums to 1.
+export type ProbabilityVector = Record<Hypothesis, number>;
+
 // The 4 buttons the duty officer can press, cheapest/least disruptive first.
 // The order matters: hysteresis (R6) moves one level at a time along this list.
 export const ACTIONS = ["WATCH", "PREPARE", "ALERT", "ESCALATE"] as const;
 export type Action = (typeof ACTIONS)[number];
+export type ActionLevel = Action; // same thing; the name used in the Phase 2 brief
 
 // Where an event came from.
 export type SourceType =
@@ -94,8 +98,33 @@ export interface PublicRegistry {
   sources: SourceRegistryEntry[];
 }
 
-// Status of a source as seen by the engine at one tick.
-export type SourceStatus = "ok" | "stale" | "dark";
+// Status of a source as seen by the engine at one tick (R5).
+//   live  : heard from within 2x its heartbeat interval
+//   stale : silent for 2x..4x its interval
+//   dark  : silent for 4x+, or its gateway was reported lost
+export type SourceStatus = "live" | "stale" | "dark";
+
+export interface SourceSummary {
+  live: number;
+  stale: number;
+  dark: number;
+  total: number;
+  coverage: number; // live / total, 0..1
+}
+
+// An event that failed validation. Kept for the dashboard, never used as evidence.
+export interface QuarantinedEvent {
+  event: Event;
+  reason: string;
+}
+
+// An event as the filter sees it: ordered, with a skew-corrected time and
+// whether its causal predecessor was already seen (see engine/order.ts).
+export interface CleanedEvent extends Event {
+  adjusted_occurred_at: Seconds; // occurred_at minus the source's estimated clock offset
+  chained: boolean; // an upstream event (e.g. drainage before traffic) came earlier in the window
+  fresh: boolean; // arrived since the last tick that ran the filter (scored this tick)
+}
 
 // One forecast line: "event X likely between p10 and p90 minutes from now".
 export interface ForecastItem {
@@ -122,8 +151,9 @@ export interface TrustSnapshot {
 // Everything the engine outputs for one simulated minute.
 export interface TickRecord {
   tick_time: Seconds;
-  probabilities: Record<Hypothesis, number>;
+  probabilities: ProbabilityVector; // the posterior after calibration widening
   action: Action;
+  expected_cost: number; // expected cost of the recommended action
   expected_costs: Record<Action, number>;
   forecast: ForecastItem[]; // next 3 events
   top_evidence: EvidenceContribution[]; // top 3 by |llr|
@@ -131,7 +161,9 @@ export interface TickRecord {
   degraded: boolean; // R5: sources went dark, uncertainty widened
   fallback: boolean; // R11: main engine failed, baseline used
   source_statuses: Record<string, SourceStatus>;
+  source_summary: SourceSummary;
   trust: TrustSnapshot[];
   retroactive_revisions: string[]; // late events that would have changed a past tick
-  quarantined_ids: string[]; // malformed events rejected this tick
+  quarantined: QuarantinedEvent[]; // malformed events rejected this tick, with the reason
+  unparsed: number; // raw events the adapter could not map at all (null), this tick
 }
