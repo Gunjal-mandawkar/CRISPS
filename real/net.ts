@@ -25,38 +25,62 @@ export function readEnv(path = join(process.cwd(), ".env")): Record<string, stri
 
 export interface CachedResponse {
   url: string; // the request URL WITHOUT tokens (tokens go in headers)
-  status: number;
+  status: number; // 0 = the request never got an answer (network error or timeout)
   headers: Record<string, string>; // only the few headers we use
-  body: string;
+  body: string; // for status 0: the error message
+  fromCache?: boolean;
 }
 
 const KEEP_HEADERS = ["content-type", "x-soda2-fields", "x-soda2-types"];
 
 // Cache file name = readable prefix + hash of the URL, so the same request
 // always maps to the same file.
-function cachePath(prefix: string, url: string): string {
+export function cachePath(prefix: string, url: string, dir = RAW_DIR): string {
   const h = createHash("sha256").update(url).digest("hex").slice(0, 16);
-  return join(RAW_DIR, `${prefix}-${h}.json`);
+  return join(dir, `${prefix}-${h}.json`);
 }
 
-// GET with cache, retry and exponential backoff on 429 and 5xx.
-// Tokens are passed as headers so they never appear in the URL, logs or cache.
-export async function cachedGet(
-  prefix: string,
-  url: string,
-  headers: Record<string, string> = {},
-  maxTries = 5,
-): Promise<CachedResponse> {
-  const file = cachePath(prefix, url);
-  if (existsSync(file)) return JSON.parse(readFileSync(file, "utf8")) as CachedResponse;
+export interface GetOptions {
+  headers?: Record<string, string>;
+  maxTries?: number; // default 5: the first try plus 4 retries
+  timeoutMs?: number; // default 30 s per request
+  fetchFn?: typeof fetch; // tests pass a fake
+  sleep?: (ms: number) => Promise<void>; // tests pass an instant one
+  dir?: string; // cache folder
+}
+
+function errText(e: unknown): string {
+  const err = e as { name?: string; message?: string; cause?: { code?: string; message?: string } };
+  return [err.name === "TimeoutError" ? "timeout" : err.message, err.cause?.code, err.cause?.message].filter(Boolean).join(" / ");
+}
+
+// GET with cache, a per-request timeout, and retry with exponential backoff
+// (2 s, 4 s, 8 s, 16 s) on 429, on 5xx, and on thrown errors (DNS failure,
+// reset connection, timeout). Tokens go in headers so they never appear in
+// the URL, the logs or the cache.
+export async function cachedGet(prefix: string, url: string, opts: GetOptions = {}): Promise<CachedResponse> {
+  const { headers = {}, maxTries = 5, timeoutMs = 30_000, fetchFn = fetch, dir = RAW_DIR } = opts;
+  const sleep = opts.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)));
+  const file = cachePath(prefix, url, dir);
+  if (existsSync(file)) return { ...(JSON.parse(readFileSync(file, "utf8")) as CachedResponse), fromCache: true };
 
   let wait = 2000;
   for (let attempt = 1; ; attempt++) {
-    const res = await fetch(url, { headers });
+    let res: Response;
+    try {
+      res = await fetchFn(url, { headers, signal: AbortSignal.timeout(timeoutMs) });
+    } catch (e) {
+      if (attempt < maxTries) {
+        await sleep(wait);
+        wait *= 2;
+        continue;
+      }
+      return { url, status: 0, headers: {}, body: `network error after ${attempt} tries: ${errText(e)}` };
+    }
     const retryable = res.status === 429 || res.status >= 500;
     if (retryable && attempt < maxTries) {
-      await new Promise((r) => setTimeout(r, wait));
-      wait *= 2; // 2 s, 4 s, 8 s, 16 s
+      await sleep(wait);
+      wait *= 2;
       continue;
     }
     const kept: Record<string, string> = {};
@@ -67,7 +91,7 @@ export async function cachedGet(
     const out: CachedResponse = { url, status: res.status, headers: kept, body: await res.text() };
     // Only successful responses are cached: a failure must be retried next run.
     if (res.ok) {
-      mkdirSync(RAW_DIR, { recursive: true });
+      mkdirSync(dir, { recursive: true });
       writeFileSync(file, JSON.stringify(out, null, 1));
     }
     return out;
