@@ -3,12 +3,12 @@
 // predict with the transition matrix, then update with clustered evidence (R1).
 // Filled in: Phase 2.
 
-import type { Hypothesis, Minutes } from "./types";
+import type { Hypothesis, Seconds } from "./types";
 import type { EvidenceCluster } from "./cluster";
 
 export function runFilter(
   clusters: EvidenceCluster[],
-  now: Minutes,
+  now: Seconds,
 ): Record<Hypothesis, number> {
   throw new Error("not implemented: runFilter (Phase 2)");
 }

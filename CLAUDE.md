@@ -7,3 +7,6 @@
 5. No LLM anywhere in the engine's decision loop. Explanations are template sentences.
 6. The engine (`/engine`) must never import ground truth (`GroundTruth` lives in `sim/truth.ts`, simulator and eval only).
 7. After every phase gate passes: write `docs/phase-reports/phase-N.md`, commit, and push to branch `claude/project-thread-0n9xmi` (`git push -u origin claude/project-thread-0n9xmi`). No PRs, no other branches, no force-push.
+8. `engine/` never imports `sim/` (a test scans every engine file for static, dynamic and require imports).
+9. The naive baseline lives in `engine/baseline.ts` and is reused later as the FALLBACK (R11). Keep it pure, small and dependency-free.
+10. Time is whole seconds since episode start; one tick = 60 s. Simulator seeds: dev 1000+, test 5000+, prior-shift 8000+. Tune only on dev.

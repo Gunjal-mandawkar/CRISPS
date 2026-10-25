@@ -43,8 +43,10 @@ export type EventKind =
   | "gateway_heartbeat_lost" // a gateway stopped pinging (supports SENSOR_FAILURE)
   | "retraction"; // "ignore my earlier event X"
 
-// Time is in simulated minutes since episode start (can be fractional).
-export type Minutes = number;
+// Time is in whole simulated SECONDS since episode start.
+// One tick = 60 s (see TICK_SECONDS). Phase 0 used minutes; Phase 1 switched to seconds.
+export type Seconds = number;
+export const TICK_SECONDS = 60;
 
 // One raw observation, after the adapter has mapped it into our schema.
 export interface Event {
@@ -56,8 +58,8 @@ export interface Event {
   kind: EventKind;
   value?: number; // e.g. rain mm/h, queue length
   reported_severity?: number; // 0..1 as claimed by the source
-  occurred_at: Minutes; // source's own clock (may be skewed, R9)
-  arrived_at: Minutes; // when the engine received it (R8 uses this)
+  occurred_at: Seconds; // source's own clock (may be skewed, R9; can even be > arrived_at)
+  arrived_at: Seconds; // engine clock: when the engine received it (R8 uses this)
   retracts?: string; // id of an event this one cancels
   text?: string; // citizen text: DATA ONLY, never instructions
   narrative_id?: string; // rumor/narrative cluster tag
@@ -69,11 +71,27 @@ export interface SourceRegistryEntry {
   source_type: SourceType;
   zone_id: string;
   gateway_id?: string;
+  heartbeat_interval_s: Seconds; // how often it normally says "I am alive"
+  nominal_latency_s: Seconds; // typical delay between event and arrival
 }
 
 export interface Zone {
   zone_id: string;
   name: string;
+  neighbours: string[]; // zone ids that touch this one (cascades spread along these)
+}
+
+export interface Gateway {
+  gateway_id: string;
+  zone_ids: string[]; // zones whose sensors relay through this gateway
+}
+
+// The PUBLIC description of the city the engine may see. The simulator's
+// hidden version (true reliability, clock offsets) lives in sim/truth.ts.
+export interface PublicRegistry {
+  zones: Zone[];
+  gateways: Gateway[];
+  sources: SourceRegistryEntry[];
 }
 
 // Status of a source as seen by the engine at one tick.
@@ -83,8 +101,8 @@ export type SourceStatus = "ok" | "stale" | "dark";
 export interface ForecastItem {
   kind: EventKind;
   probability: number; // already weighted by P(cascade)
-  window_p10: Minutes;
-  window_p90: Minutes;
+  window_p10: Seconds;
+  window_p90: Seconds;
 }
 
 // One evidence contribution, for explanations (R7).
@@ -103,7 +121,7 @@ export interface TrustSnapshot {
 
 // Everything the engine outputs for one simulated minute.
 export interface TickRecord {
-  tick_time: Minutes;
+  tick_time: Seconds;
   probabilities: Record<Hypothesis, number>;
   action: Action;
   expected_costs: Record<Action, number>;
