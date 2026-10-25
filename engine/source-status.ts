@@ -54,3 +54,18 @@ export function summarize(statuses: Record<string, SourceStatus>): SourceSummary
   const live = count("live");
   return { live, stale: count("stale"), dark: count("dark"), total: all.length, coverage: all.length ? live / all.length : 1 };
 }
+
+// Trust-weighted coverage (Phase 4): each source counts with its weight (its type's
+// mean trust), so losing a few high-trust hospitals and rain gauges lowers coverage
+// more than losing many low-trust citizen channels.
+//   coverage = sum of weights of LIVE sources / sum of weights of ALL sources
+export function weightedCoverage(statuses: Record<string, SourceStatus>, weights: Record<string, number>): number {
+  let live = 0;
+  let total = 0;
+  for (const [id, st] of Object.entries(statuses)) {
+    const w = weights[id] ?? 1;
+    total += w;
+    if (st === "live") live += w;
+  }
+  return total > 0 ? live / total : 1;
+}

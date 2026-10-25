@@ -25,6 +25,8 @@ export interface Summary {
   twin_commit_benign_min: number;
   twin_commit_benign_never: number;
   fallback_ticks: number;
+  degraded_ticks: number;
+  degraded_episodes: number;
   forecast_items: number; // cascade episodes only
   forecast_accuracy: number; // share of forecast lines with a real event of that kind inside their window
   forecast_start_accuracy: number; // stricter: share whose stage truly STARTED inside the window
@@ -61,6 +63,8 @@ export function summarize(rs: EpisodeResult[]): Summary {
     twin_commit_benign_min: mean(done(commits("benign"))),
     twin_commit_benign_never: commits("benign").length - done(commits("benign")).length,
     fallback_ticks: rs.reduce((s, r) => s + r.fallback_ticks, 0),
+    degraded_ticks: rs.reduce((s, r) => s + (r.degraded_ticks ?? 0), 0),
+    degraded_episodes: rs.filter((r) => (r.degraded_ticks ?? 0) > 0).length,
     forecast_items: rs.reduce((s, r) => s + (r.forecast_items ?? 0), 0),
     forecast_accuracy: rs.reduce((s, r) => s + (r.forecast_hits ?? 0), 0) / rs.reduce((s, r) => s + (r.forecast_items ?? 0), 0),
     forecast_start_accuracy: rs.reduce((s, r) => s + (r.forecast_start_hits ?? 0), 0) / rs.reduce((s, r) => s + (r.forecast_items ?? 0), 0),
@@ -94,6 +98,7 @@ export function formatReport(policy: string, split: string, s: Summary, groups: 
   L.push(`  Twin: pre-split overconfidence (0 = base rates)  ${f(s.twin_pre_split_overconf)}`);
   L.push(`  Twin: time-to-commit after split (p>=${COMMIT_P}, min)  cascade ${f(s.twin_commit_cascade_min, 2)} (never: ${s.twin_commit_cascade_never}), benign ${f(s.twin_commit_benign_min, 2)} (never: ${s.twin_commit_benign_never})`);
   L.push(`  Fallback ticks                                   ${s.fallback_ticks}`);
+  L.push(`  DEGRADED ticks                                   ${s.degraded_ticks}   (${s.degraded_episodes} episodes)`);
   L.push(`  Forecast accuracy (cascades: real event in window) ${pct(s.forecast_accuracy)}   (${s.forecast_items} distinct forecast lines; stricter "stage started in window": ${pct(s.forecast_start_accuracy)})`);
   L.push("");
   L.push(`${"group".padEnd(26)} ${pad("n", 3)} ${pad("truth", 9)} ${pad("Brier", 6)} ${pad("LogLoss", 7)} ${pad("Cost/tick", 9)} ${pad("ALERT+", 7)} ${pad("Lead(min)", 9)} ${pad("Flips", 5)}`);
@@ -118,13 +123,50 @@ export function formatComparison(split: string, rows: [string, Summary][]): stri
   for (const [n, s] of rows) {
     L.push(`${n.padEnd(16)} ${pad(f(s.brier), 6)} ${pad(f(s.log_loss), 7)} ${pad(f(s.cost_per_tick, 2), 9)} ${pad(pct(s.false_alarm_rate), 10)} ${pad(f(s.mean_lead_min, 2), 9)} ${pad(s.flips_total, 5)} ${pad(s.fallback_ticks, 8)} ${pad(pct(s.forecast_accuracy), 8)}`);
   }
-  const e = rows.find(([n]) => n === "engine")?.[1];
-  const c = rows.find(([n]) => n === "count-threshold")?.[1];
-  if (e && c) {
-    const d = (x: number, unit = "", digits = 3) => `${x >= 0 ? "+" : ""}${x.toFixed(digits)}${unit} (${x < 0 ? "engine better" : x > 0 ? "engine worse" : "tie"})`;
-    const wins = [e.brier < c.brier, e.false_alarm_rate < c.false_alarm_rate, e.cost_per_tick < c.cost_per_tick].filter(Boolean).length;
-    L.push("");
-    L.push(`engine vs count-threshold: Brier ${d(e.brier - c.brier)}, false-alarm rate ${d(100 * (e.false_alarm_rate - c.false_alarm_rate), " pts", 1)}, cost/tick ${d(e.cost_per_tick - c.cost_per_tick, "", 2)}  -> engine wins ${wins}/3`);
+  const get = (name: string) => rows.find(([n]) => n === name)?.[1];
+  const c = get("count-threshold");
+  const vs = (a: string, b: string) => {
+    const e = get(a);
+    const o = get(b);
+    if (!e || !o) return;
+    const d = (x: number, unit = "", digits = 3) => `${x >= 0 ? "+" : ""}${x.toFixed(digits)}${unit} (${x < 0 ? `${a} better` : x > 0 ? `${a} worse` : "tie"})`;
+    const wins = [e.brier < o.brier, e.false_alarm_rate < o.false_alarm_rate, e.cost_per_tick < o.cost_per_tick].filter(Boolean).length;
+    L.push(`${a} vs ${b}: Brier ${d(e.brier - o.brier)}, false-alarm rate ${d(100 * (e.false_alarm_rate - o.false_alarm_rate), " pts", 1)}, cost/tick ${d(e.cost_per_tick - o.cost_per_tick, "", 2)}  -> ${a} wins ${wins}/3`);
+  };
+  L.push("");
+  if (c) {
+    vs("engine", "count-threshold");
+    vs("engine-handset", "count-threshold");
+  }
+  vs("engine", "engine-handset");
+  return L.join("\n");
+}
+
+// Learning panels (Phase 4) ------------------------------------------------------
+
+export function formatPrior(p: Record<string, number>): string {
+  return `N ${p.NOISE.toFixed(3)}  S ${p.SENSOR_FAILURE.toFixed(3)}  I ${p.ISOLATED_INCIDENT.toFixed(3)}  C ${p.CASCADING_CRISIS.toFixed(3)}`;
+}
+
+// Top and bottom sources by learned trust.
+export function formatTrustPanel(ranked: { source_id: string; source_type: string; alpha: number; beta: number; mean: number }[], n = 5): string {
+  const line = (t: (typeof ranked)[number]) => `  ${t.source_id.padEnd(14)} ${t.source_type.padEnd(16)} trust ${t.mean.toFixed(3)}   Beta(${t.alpha.toFixed(1)}, ${t.beta.toFixed(1)})`;
+  const L = [`Trust panel (${ranked.length} sources ever seen)`, `top ${n}:`, ...ranked.slice(0, n).map(line), `bottom ${n}:`, ...ranked.slice(-n).map(line)];
+  const byType = new Map<string, number[]>();
+  for (const t of ranked) byType.set(t.source_type, [...(byType.get(t.source_type) ?? []), t.mean]);
+  L.push("mean trust by source type:");
+  for (const [type, xs] of [...byType.entries()].sort((a, b) => mean(b[1]) - mean(a[1]))) L.push(`  ${type.padEnd(16)} ${mean(xs).toFixed(3)}   (${xs.length} sources, min ${Math.min(...xs).toFixed(3)}, max ${Math.max(...xs).toFixed(3)})`);
+  return L.join("\n");
+}
+
+// Prior-shift sequence: the halves before / after the regime change.
+export function formatShift(rows: [string, EpisodeResult[]][], shiftAt: number): string {
+  const L = [`Prior-shift sequence: episodes 1-${shiftAt} normal regime, ${shiftAt + 1}-${rows[0][1].length} monsoon`];
+  L.push(`${"policy".padEnd(20)} ${pad("Brier 1-50", 10)} ${pad("Brier 51-100", 12)} ${pad("Cost 1-50", 9)} ${pad("Cost 51-100", 11)} ${pad("FA 1-50", 8)} ${pad("FA 51-100", 9)}`);
+  for (const [name, rs] of rows) {
+    const a = summarize(rs.slice(0, shiftAt));
+    const b = summarize(rs.slice(shiftAt));
+    L.push(`${name.padEnd(20)} ${pad(f(a.brier), 10)} ${pad(f(b.brier), 12)} ${pad(f(a.cost_per_tick, 2), 9)} ${pad(f(b.cost_per_tick, 2), 11)} ${pad(pct(a.false_alarm_rate), 8)} ${pad(pct(b.false_alarm_rate), 9)}`);
   }
   return L.join("\n");
 }

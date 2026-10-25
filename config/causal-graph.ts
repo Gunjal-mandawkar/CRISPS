@@ -5,12 +5,15 @@
 // Each edge says: "if the upstream stage started at time t, the downstream stage
 // usually starts lag.mean seconds later, give or take lag.sd", and pass_through is
 // the chance a cascade actually reaches the next stage (not every flood blocks roads).
-// Hand-set from the crisis story. Honest note: the lag means are the simulator's
-// own stage lags, rounded (the simulator was written from the same story).
-// The hospital -> power edge is our approximation: in the simulator power load
-// follows the calls about 4.5 min later, i.e. about 2 min after the hospital stage.
+// Phases 2-3 used hand-set lags copied from the simulator's own stage lags
+// (HANDSET_LAGS below). Since Phase 4 each edge uses the lag MEASURED on dev
+// cascade episodes by `npm run tune -- --split dev` (config/lags.ts), and falls
+// back to the hand-set lag if an edge was never measured. Swap in a different
+// data source and the lags update with it.
+// pass_through stays hand-set.
 
 import type { EventKind } from "../engine/types";
+import { LEARNED_LAGS } from "./lags";
 
 export interface CausalEdge {
   from: EventKind;
@@ -28,10 +31,32 @@ export const CAUSAL_ORDER: EventKind[] = [
   "power_comms_load",
 ];
 
-export const CAUSAL_EDGES: CausalEdge[] = [
-  { from: "rain_heavy", to: "drainage_anomaly", lag: { mean: 180, sd: 60 }, pass_through: 0.9 },
-  { from: "drainage_anomaly", to: "traffic_slowdown", lag: { mean: 120, sd: 45 }, pass_through: 0.9 },
-  { from: "traffic_slowdown", to: "emergency_call_spike", lag: { mean: 120, sd: 45 }, pass_through: 0.85 },
-  { from: "emergency_call_spike", to: "hospital_arrivals_unusual", lag: { mean: 150, sd: 60 }, pass_through: 0.85 },
-  { from: "hospital_arrivals_unusual", to: "power_comms_load", lag: { mean: 120, sd: 90 }, pass_through: 0.7 },
-];
+// The hand-set lags (key = the downstream stage). The hospital -> power edge was
+// our approximation: in the simulator power load follows the calls ~4.5 min later.
+export const HANDSET_LAGS: Partial<Record<EventKind, { mean: number; sd: number }>> = {
+  drainage_anomaly: { mean: 180, sd: 60 },
+  traffic_slowdown: { mean: 120, sd: 45 },
+  emergency_call_spike: { mean: 120, sd: 45 },
+  hospital_arrivals_unusual: { mean: 150, sd: 60 },
+  power_comms_load: { mean: 120, sd: 90 },
+};
+
+const PASS_THROUGH: Partial<Record<EventKind, number>> = {
+  drainage_anomaly: 0.9,
+  traffic_slowdown: 0.9,
+  emergency_call_spike: 0.85,
+  hospital_arrivals_unusual: 0.85,
+  power_comms_load: 0.7,
+};
+
+const lagInto = (to: EventKind) => {
+  const l = LEARNED_LAGS[to] ?? HANDSET_LAGS[to]!;
+  return { mean: l.mean, sd: l.sd };
+};
+
+export const CAUSAL_EDGES: CausalEdge[] = CAUSAL_ORDER.slice(1).map((to, i) => ({
+  from: CAUSAL_ORDER[i],
+  to,
+  lag: lagInto(to),
+  pass_through: PASS_THROUGH[to]!,
+}));

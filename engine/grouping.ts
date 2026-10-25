@@ -32,9 +32,11 @@
 // B3. Everything becomes an EvidenceUnit: singles, near-duplicate clusters,
 //   gateway groups, narrative clusters. The filter scores units.
 
-import { CLUSTER_KNOBS, FILTER_KNOBS } from "../config/knobs";
+import { CLUSTER_KNOBS } from "../config/knobs";
+import { TRUST_PRIORS } from "../config/trust-priors";
 import { type Cluster, effectiveWeight, isSurge } from "./cluster";
 import { isStrong } from "./order";
+import { betaMean, geometricMean } from "./trust";
 import type { CleanedEvent, Event, EvidenceUnit, PublicRegistry, Seconds } from "./types";
 
 const NOT_EVIDENCE = new Set(["heartbeat", "retraction", "gateway_heartbeat_lost"]);
@@ -119,7 +121,10 @@ export function isCorroborated(c: Cluster, window: CleanedEvent[], ignore: { has
   );
 }
 
-const trustOf = (e: Event) => FILTER_KNOBS.trust[e.source_type] ?? FILTER_KNOBS.trust.default;
+// How much we trust one event's source (0..1). The engine passes the learned
+// per-source trust (engine/trust.ts); the default is the starting guess for the type.
+export type TrustLookup = (e: Event) => number;
+export const typePriorTrust: TrustLookup = (e) => betaMean(TRUST_PRIORS[e.source_type]);
 const zeroRow = () => ({ NOISE: 0, SENSOR_FAILURE: 0, ISOLATED_INCIDENT: 0, CASCADING_CRISIS: 0 });
 
 function median(xs: number[]): number | undefined {
@@ -129,7 +134,8 @@ function median(xs: number[]): number | undefined {
 }
 
 // B3: a cluster as the filter sees it. hypothesis_contributions is filled by the filter.
-export function toUnit(c: Cluster, k = CLUSTER_KNOBS): EvidenceUnit {
+// trust = geometric mean of the trust of its DISTINCT sources (engine/trust.ts).
+export function toUnit(c: Cluster, k = CLUSTER_KNOBS, trustOf: TrustLookup = typePriorTrust): EvidenceUnit {
   const m = c.members;
   const n = m.length;
   let weight: number;
@@ -145,7 +151,7 @@ export function toUnit(c: Cluster, k = CLUSTER_KNOBS): EvidenceUnit {
     weight,
     strong: m.some((e) => isStrong(e)),
     chained: m.some((e) => e.chained),
-    trust: n ? m.reduce((s, e) => s + trustOf(e), 0) / n : 0,
+    trust: n ? geometricMean([...new Map(m.map((e) => [e.source_id, trustOf(e)])).values()]) : 0,
     first_t: n ? Math.min(...m.map((e) => e.adjusted_occurred_at)) : c.anchor_t,
     last_t: n ? Math.max(...m.map((e) => e.adjusted_occurred_at)) : c.anchor_t,
     last_arrived_at: n ? Math.max(...m.map((e) => e.arrived_at)) : 0,

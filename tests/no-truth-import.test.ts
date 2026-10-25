@@ -19,7 +19,8 @@ describe("engine isolation", () => {
     const files = tsFiles(join(__dirname, "..", "engine"));
     expect(files.length).toBeGreaterThan(10);
     const names = files.map((f) => f.split(/[\\/]/).pop());
-    for (const f of ["adapter.ts", "validate.ts", "log.ts", "order.ts", "source-status.ts", "filter.ts", "decide.ts", "tick.ts", "cluster.ts", "grouping.ts", "forecast.ts", "explain.ts"]) expect(names).toContain(f);
+    for (const f of ["adapter.ts", "validate.ts", "log.ts", "order.ts", "source-status.ts", "filter.ts", "decide.ts", "tick.ts", "cluster.ts", "grouping.ts", "forecast.ts", "explain.ts", "trust.ts", "priors.ts", "drift.ts", "learn.ts", "tune.ts"])
+      expect(names).toContain(f);
     for (const file of files) {
       const src = readFileSync(file, "utf8");
       for (const dir of ["sim", "eval"]) {
@@ -29,5 +30,14 @@ describe("engine isolation", () => {
       }
       expect(src, file).not.toMatch(/^\s*import[^;]*\b(GroundTruth|EventTruth)\b/m); // the truth types, whatever the path
     }
+  });
+
+  it("the tick runner never calls the learning loop: the outcome only reaches engine/learn.ts, between episodes", () => {
+    const dir = join(__dirname, "..", "engine");
+    const tick = readFileSync(join(dir, "tick.ts"), "utf8");
+    expect(tick).not.toMatch(/from\s+["']\.\/learn["']/);
+    expect(tick).not.toMatch(/updateAfterEpisode|revealedOutcome/);
+    // and the learning loop itself takes the outcome as a plain label, not the simulator's truth object
+    expect(readFileSync(join(dir, "learn.ts"), "utf8")).toMatch(/revealedOutcome: Hypothesis/);
   });
 });

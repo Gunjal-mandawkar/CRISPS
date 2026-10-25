@@ -3,7 +3,10 @@
 
 import { describe, expect, it } from "vitest";
 import { GATEWAY_CORRELATED, LIKELIHOODS, RUMOR_CAPPED } from "../config/likelihoods";
-import { FILTER_KNOBS } from "../config/knobs";
+import { TRUST_PRIORS } from "../config/trust-priors";
+import { betaMean } from "../engine/trust";
+
+const CITIZEN_TRUST = betaMean(TRUST_PRIORS.citizen_report); // a lone citizen channel, before any learning
 import { ClusterBook } from "../engine/cluster";
 import { unitLogLikelihood } from "../engine/filter";
 import { detectGatewayGroups, gatewaySensorCounts, isCorroborated, toUnit } from "../engine/grouping";
@@ -78,8 +81,9 @@ describe("narrative clusters (rumor cap)", () => {
     expect(u.n).toBe(8);
     expect(u.weight).toBe(1);
     const row = unitLogLikelihood(u);
-    expect(row.ISOLATED_INCIDENT).toBeCloseTo(FILTER_KNOBS.trust.citizen_report * RUMOR_CAPPED.ISOLATED_INCIDENT, 9);
-    expect(row.CASCADING_CRISIS).toBeCloseTo(0, 9);
+    expect(row.ISOLATED_INCIDENT).toBeCloseTo(CITIZEN_TRUST * RUMOR_CAPPED.ISOLATED_INCIDENT, 9);
+    expect(row.CASCADING_CRISIS).toBeCloseTo(CITIZEN_TRUST * RUMOR_CAPPED.CASCADING_CRISIS, 9);
+    expect(Math.abs(row.CASCADING_CRISIS)).toBeLessThan(0.1); // one weak unit at most
   });
 
   it("the same 8 reports + 1 drainage anomaly in the same zone -> full cluster weight 1 + ln 8", () => {
@@ -91,7 +95,7 @@ describe("narrative clusters (rumor cap)", () => {
     const u = toUnit(c);
     expect(u.weight).toBeCloseTo(1 + Math.log(8), 9);
     const row = unitLogLikelihood(u);
-    expect(row.ISOLATED_INCIDENT).toBeCloseTo(u.weight * FILTER_KNOBS.trust.citizen_report * LIKELIHOODS.citizen_report!.alone.ISOLATED_INCIDENT, 9);
+    expect(row.ISOLATED_INCIDENT).toBeCloseTo(u.weight * CITIZEN_TRUST * LIKELIHOODS.citizen_report!.alone.ISOLATED_INCIDENT, 9);
   });
 
   it("corroboration needs the same zone, a clear anomaly, and +/- 5 min", () => {
@@ -110,7 +114,10 @@ describe("narrative clusters (rumor cap)", () => {
     const wave = Array.from({ length: 30 }, (_, i) => ev({ arrived_at: 560 + i, source_id: "cit0", source_type: "citizen_report", kind: "citizen_report", zone_id: "z1", narrative_id: "n-rumor", reported_severity: 0.9 }));
     const capped = new Engine(REGISTRY).tick(wave, 600);
     const independent = new Engine(REGISTRY).tick(wave.map((e, i) => ({ ...e, narrative_id: `n-${i}`, zone_id: i % 2 ? "z0" : "z1" })), 600);
+    const quiet = new Engine(REGISTRY).tick([], 600);
+    // how far each moved the belief: sum over hypotheses of |p - p with no evidence|
+    const moved = (r: typeof quiet) => Object.keys(r.probabilities).reduce((s, h) => s + Math.abs(r.probabilities[h as keyof typeof r.probabilities] - quiet.probabilities[h as keyof typeof r.probabilities]), 0);
     expect(capped.probabilities.ISOLATED_INCIDENT).toBeLessThan(0.25);
-    expect(independent.probabilities.ISOLATED_INCIDENT).toBeGreaterThan(capped.probabilities.ISOLATED_INCIDENT);
+    expect(moved(independent)).toBeGreaterThan(3 * moved(capped));
   });
 });
